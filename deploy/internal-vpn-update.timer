@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh internal VPN membership
+
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=15s
+Unit=internal-vpn-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,29 @@
+{
+  "doctype": "DocType",
+  "name": "VPN Network",
+  "module": "Internal VPN",
+  "autoname": "prompt",
+  "engine": "InnoDB",
+  "field_order": [
+    "subnet",
+    "revision"
+  ],
+  "fields": [
+    {
+      "fieldname": "subnet",
+      "label": "Subnet",
+      "fieldtype": "Data"
+    },
+    {
+      "fieldname": "revision",
+      "label": "Revision",
+      "fieldtype": "Int"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "VPN Manager",
+      "read": 1
+    }
+  ]
+}

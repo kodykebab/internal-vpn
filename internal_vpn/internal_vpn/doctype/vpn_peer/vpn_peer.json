@@ -1,0 +1,80 @@
+{
+  "doctype": "DocType",
+  "name": "VPN Peer",
+  "module": "Internal VPN",
+  "autoname": "hash",
+  "engine": "InnoDB",
+  "field_order": [
+    "kind",
+    "user",
+    "public_key",
+    "address",
+    "endpoint",
+    "enabled",
+    "reported_revision",
+    "apply_success",
+    "reported_at"
+  ],
+  "fields": [
+    {
+      "fieldname": "kind",
+      "label": "Kind",
+      "fieldtype": "Select",
+      "options": "Service\nDevice",
+      "reqd": 1
+    },
+    {
+      "fieldname": "user",
+      "label": "User",
+      "fieldtype": "Link",
+      "options": "User",
+      "reqd": 1
+    },
+    {
+      "fieldname": "public_key",
+      "label": "Public Key",
+      "fieldtype": "Data",
+      "unique": 1,
+      "reqd": 1
+    },
+    {
+      "fieldname": "address",
+      "label": "Address",
+      "fieldtype": "Data",
+      "unique": 1,
+      "reqd": 1
+    },
+    {
+      "fieldname": "endpoint",
+      "label": "Endpoint",
+      "fieldtype": "Data"
+    },
+    {
+      "fieldname": "enabled",
+      "label": "Enabled",
+      "fieldtype": "Check",
+      "default": 1
+    },
+    {
+      "fieldname": "reported_revision",
+      "label": "Reported Revision",
+      "fieldtype": "Int"
+    },
+    {
+      "fieldname": "apply_success",
+      "label": "Apply Success",
+      "fieldtype": "Check"
+    },
+    {
+      "fieldname": "reported_at",
+      "label": "Reported At",
+      "fieldtype": "Datetime"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "VPN Manager",
+      "read": 1
+    }
+  ]
+}
