@@ -1,0 +1,11 @@
+# Provisioning template: replace ivpn0/subnet for the selected host allocation.
+# Integrate with the host's existing firewall; an accept here cannot override
+# a drop in another base chain. This does not implement application INPUT rules.
+table inet internal_vpn {
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+        iifname "ivpn0" oifname "ivpn0" ip saddr 100.100.64.0/24 ip daddr 100.100.64.0/24 accept
+        iifname "ivpn0" counter drop
+        oifname "ivpn0" counter drop
+    }
+}

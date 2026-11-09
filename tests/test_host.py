@@ -18,9 +18,9 @@ def key(byte):
 class HostTests(unittest.TestCase):
     def setUp(self):
         self.local = dict(name="service-1", subnet="100.100.64.0/24", address="100.100.64.1",
-                          public_key=key(1), interface="ivpn0")
-        self.data = dict(version=1, revision=3, **{k: v for k, v in self.local.items() if k != "interface"},
-                         peers=[dict(public_key=key(2), address="100.100.64.2", endpoint="192.0.2.2:51820")])
+                          public_key=key(1), interface="ivpn0", topology="hub")
+        self.data = dict(version=2, revision=3, **{k: v for k, v in self.local.items() if k != "interface"},
+                         peers=[dict(public_key=key(2), address="100.100.64.2", endpoint=None, allowed_ips="100.100.64.2/32")])
 
     def test_valid_snapshot_and_learned_device_endpoint(self):
         self.assertEqual(len(validate_snapshot(self.data, self.local)), 64)

@@ -6,7 +6,8 @@
   "engine": "InnoDB",
   "field_order": [
     "subnet",
-    "revision"
+    "revision",
+    "hub"
   ],
   "fields": [
     {
@@ -18,6 +19,12 @@
       "fieldname": "revision",
       "label": "Revision",
       "fieldtype": "Int"
+    },
+    {
+      "fieldname": "hub",
+      "label": "Hub",
+      "fieldtype": "Link",
+      "options": "VPN Peer"
     }
   ],
   "permissions": [

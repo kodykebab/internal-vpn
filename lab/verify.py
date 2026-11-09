@@ -33,7 +33,7 @@ url = "https://127.0.0.1:18441"
 ca_file = str(BASE / "config/server.crt")
 run_id = secrets.token_hex(4)
 host_root = Path("/run") / ("internal-vpn-poc-" + run_id)
-namespace_names = [f"ivpn-poc-{run_id}-{i}" for i in range(4)]
+namespace_names = [f"ivpn-poc-{run_id}-{i}" for i in range(5)]
 
 
 def run(*args, check=True, input=None):
@@ -137,7 +137,7 @@ try:
     engineer, engineer_token = create_user("engineer", ["VPN Engineer"])
     other_engineer, other_engineer_token = create_user("other-engineer", ["VPN Engineer"])
     outsider, outsider_token = create_user("outsider", [])
-    hosts = [create_user(f"service{i}", ["VPN Host"]) for i in range(2)]
+    hosts = [create_user(f"service{i}", ["VPN Host"]) for i in range(3)]
     frappe.db.commit()
     frappe.destroy()
 
@@ -180,21 +180,22 @@ try:
         api("initialize", manager_token, {"subnet": "100.100.64.0/24"})
 
         public_keys, configs, addresses = [], [], []
-        for index in range(4):
+        for index in range(5):
             private = run("wg", "genkey").stdout.strip()
             public = run("wg", "pubkey", input=private).stdout.strip()
             public_keys.append(public)
             keyfile = directory / f"key{index}"
             keyfile.write_text(private)
             keyfile.chmod(0o600)
-            if index < 2:
-                record = api("register", manager_token, dict(kind="Service", public_key=public, user=hosts[index][0],
-                             endpoint=f"127.0.0.1:{56441 + index}"))
+            if index in (0, 1, 4):
+                host_index = {0: 0, 1: 1, 4: 2}[index]
+                record = api("register", manager_token, dict(kind="Service", public_key=public, user=hosts[host_index][0],
+                             endpoint="127.0.0.1:56441" if index == 0 else None))
             elif index == 2:
                 record = api("register", engineer_token, dict(kind="Device", public_key=public))
             else:
                 record = {"name": "unregistered", "address": "100.100.64.254"}
-            if index < 3:
+            if index != 3:
                 peer_names.append(record["name"])
             addresses.append(record["address"])
             name = namespace_names[index]
@@ -210,14 +211,25 @@ try:
             run("sudo", "ip", "-n", name, "link", "set", "ivpn0", "up")
             config = dict(name=record["name"], address=record["address"], public_key=public,
                           subnet="100.100.64.0/24", interface="ivpn0", namespace=name,
-                          url=url, ca_file=ca_file, token=hosts[index][1] if index < 2 else engineer_token)
+                          url=url, ca_file=ca_file, token=hosts[{0: 0, 1: 1, 4: 2}[index]][1] if index in (0, 1, 4) else engineer_token,
+                          topology="hub" if index == 0 else "spoke", hub_public_key=public_keys[0])
             configs.append(config)
-            if index < 2:
+            if index in (0, 1, 4):
                 path = directory / f"host{index}.json"
                 path.write_text(json.dumps(config))
                 path.chmod(0o600)
                 run("sudo", "install", "-m", "0600", str(path), str(host_root / f"host{index}.json"))
                 path.unlink()
+
+        api("set_hub", manager_token, {"name": peer_names[0]})
+        check("engineer_cannot_choose_hub", request("/api/method/internal_vpn.api.set_hub", engineer_token,
+              {"name": peer_names[1]})[0] == 403)
+        check("hub_cannot_be_disabled", request("/api/method/internal_vpn.api.update_peer", manager_token,
+              {"name": peer_names[0], "enabled": 0})[0] == 417)
+        check("hub_account_cannot_be_disabled", request("/api/resource/User/" + hosts[0][0], manager_token,
+              {"enabled": 0}, method="PUT")[0] == 417)
+        net(0, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.send_redirects=0")
+        net(0, "nft", "-f", str(SOURCE / "deploy/hub-forward.nft"))
 
         def update(index, expect=True):
             result = run("sudo", "python3", str(host_root / "run-host.py"), "--config", str(host_root / f"host{index}.json"),
@@ -233,7 +245,7 @@ try:
                 if peer["endpoint"]:
                     if reconnect:
                         net(index, "wg", "set", "ivpn0", "peer", peer["public_key"], "remove")
-                    net(index, "wg", "set", "ivpn0", "peer", peer["public_key"], "allowed-ips", peer["address"] + "/32",
+                    net(index, "wg", "set", "ivpn0", "peer", peer["public_key"], "allowed-ips", peer["allowed_ips"],
                         "endpoint", peer["endpoint"], "persistent-keepalive", "25")
             return data
 
@@ -268,7 +280,16 @@ try:
         update(0)
         update(1)
         configure_client()
-        check("direct_service_connectivity", ping(0, addresses[1]) and ping(1, addresses[0]))
+        spoke_before_membership = api("configuration", hosts[1][1], {"name": peer_names[1]}, get=True)
+        update(4)
+        check("hub_service_connectivity", ping(0, addresses[1]) and ping(1, addresses[0]))
+        check("service_spokes_communicate_through_hub", ping(1, addresses[4]) and ping(4, addresses[1]))
+        check("spokes_have_only_the_hub_peer", all(net(i, "wg", "show", "ivpn0", "peers").stdout.strip() == public_keys[0] for i in (1, 2, 4)))
+        check("spoke_configuration_contains_only_hub", all(len(api("configuration", hosts[j][1],
+              {"name": configs[i]["name"]}, get=True)["peers"]) == 1 for i, j in ((1, 1), (4, 2))))
+        net(0, "sysctl", "-qw", "net.ipv4.ip_forward=0")
+        check("spoke_paths_require_hub_forwarding", not ping(1, addresses[4]) and not ping(2, addresses[1]))
+        net(0, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.send_redirects=0")
         check("engineer_reaches_both_services", ping(2, addresses[0]) and ping(2, addresses[1]))
         check("applied_revision_reported", api("status", manager_token, get=True)["all_current"])
         denied = net(0, "runuser", "-u", "vagrant", "--", "wg", "set", "ivpn0", "listen-port", "56441", check=False)
@@ -284,6 +305,30 @@ try:
         run("sudo", "ip", "-n", namespace_names[2], "address", "add", "100.100.64.253/32", "dev", "ivpn0")
         check("spoofed_source_rejected", net(2, "ping", "-I", "100.100.64.253", "-c", "1", "-W", "1", addresses[0], check=False).returncode != 0)
         run("sudo", "ip", "-n", namespace_names[2], "address", "del", "100.100.64.253/32", "dev", "ivpn0")
+
+        run("sudo", "ip", "-n", namespace_names[0], "link", "add", "outside", "type", "dummy")
+        run("sudo", "ip", "-n", namespace_names[0], "address", "add", "198.18.0.1/24", "dev", "outside")
+        run("sudo", "ip", "-n", namespace_names[0], "link", "set", "outside", "up")
+        run("sudo", "ip", "-n", namespace_names[2], "route", "add", "198.18.0.0/24", "dev", "ivpn0")
+        net(2, "wg", "set", "ivpn0", "peer", public_keys[0], "allowed-ips", "0.0.0.0/0")
+        def refused_packets():
+            data = json.loads(net(0, "nft", "-j", "list", "chain", "inet", "internal_vpn", "forward").stdout)
+            return sum(expression["counter"]["packets"] for entry in data["nftables"]
+                       for expression in entry.get("rule", {}).get("expr", []) if "counter" in expression)
+        refused_before = refused_packets()
+        ping(2, "198.18.0.2")
+        check("hub_firewall_rejects_forwarding_outside_vpn", refused_packets() > refused_before)
+        configure_client()
+        run("sudo", "ip", "-n", namespace_names[2], "route", "del", "198.18.0.0/24")
+        run("sudo", "ip", "-n", namespace_names[0], "link", "del", "outside")
+
+        echo = subprocess.Popen(["sudo", "ip", "netns", "exec", namespace_names[1], "runuser", "-u", "nobody", "--",
+                                 "python3", "-c", (SOURCE / "lab/echo_address.py").read_text(), addresses[1]],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processes.append(echo)
+        time.sleep(.3)
+        response = json.loads(net(2, "curl", "--noproxy", "*", "--max-time", "3", "-s", f"http://{addresses[1]}:8089").stdout)
+        check("hub_preserves_engineer_source_address", response["source"] == addresses[2])
 
         http = subprocess.Popen(["sudo", "ip", "netns", "exec", namespace_names[0], "runuser", "-u", "nobody", "--",
                                  "python3", "-m", "http.server", "8088", "--bind", addresses[0], "--directory", "/var/empty"],
@@ -320,12 +365,15 @@ try:
 
         stale = api("configuration", hosts[0][1], {"name": peer_names[0]}, get=True)
         revocation = api("update_peer", engineer_token, {"name": peer_names[2], "enabled": 0})
+        spoke_after_membership = api("configuration", hosts[1][1], {"name": peer_names[1]}, get=True)
+        check("spoke_peer_graph_unchanged_by_device_removal", spoke_before_membership["peers"] == spoke_after_membership["peers"])
         check("revocation_initially_pending", not api("status", manager_token, get=True)["all_current"])
         check("old_acknowledgement_rejected", request("/api/method/internal_vpn.api.report", hosts[0][1],
               {"name": peer_names[0], "revision": stale["revision"], "success": True})[0] == 417)
         update(0)
-        check("partial_revocation_is_incomplete", not ping(2, addresses[0]) and ping(2, addresses[1]) and
-              not api("status", manager_token, get=True)["all_current"])
+        check("hub_only_revocation_blocks_all_services", not ping(2, addresses[0]) and not ping(2, addresses[1]) and
+              not ping(2, addresses[4]) and api("status", manager_token, get=True)["hub_current"])
+        check("unchanged_spokes_remain_current_without_refresh", api("status", manager_token, get=True)["all_current"])
         update(1)
         check("complete_revocation_blocks_both", not ping(2, addresses[0]) and not ping(2, addresses[1]) and
               api("status", manager_token, get=True)["all_current"])
@@ -386,7 +434,11 @@ try:
         run("sudo", "ip", "-n", namespace_names[0], "address", "add", addresses[0] + "/24", "dev", "ivpn0")
         run("sudo", "ip", "-n", namespace_names[0], "link", "set", "ivpn0", "up")
         update(0)
-        check("interface_restart_reapplies_current_peers", ping(0, addresses[1]) and api("status", manager_token, get=True)["all_current"])
+        # Recreated hub has no learned endpoints/sessions. Reconnect the spoke explicitly;
+        # this tests reconciliation, not an instantaneous automatic recovery guarantee.
+        net(1, "wg", "set", "ivpn0", "peer", public_keys[0], "remove")
+        update(1)
+        check("interface_restart_reapplies_current_peers", ping(1, addresses[0]) and ping(0, addresses[1]) and api("status", manager_token, get=True)["all_current"])
         check("interface_restart_preserves_revocation", not ping(2, addresses[0]))
 
         api("update_peer", manager_token, {"name": peer_names[1], "enabled": 0})
@@ -400,8 +452,7 @@ try:
         public = run("wg", "pubkey", input=private).stdout.strip()
         api("register", other_engineer_token, {"kind": "Device", "public_key": public})
         update(0)
-        # Expected evidence of the retirement gap, not a successful retirement acceptance test.
-        check("retired_service_still_blocks_later_revision_status", not api("status", manager_token, get=True)["all_current"])
+        check("retired_spoke_does_not_block_later_revisions", api("status", manager_token, get=True)["all_current"])
 
 finally:
     for name in namespaces:
@@ -425,6 +476,7 @@ finally:
     frappe.init("test.local")
     frappe.connect()
     if frappe.conf.db_name == "ivpn_poc":
+        frappe.db.set_value("VPN Network", "default", "hub", None)
         for user in users:
             frappe.db.delete("VPN Peer", {"user": user})
             frappe.delete_doc("User", user, ignore_permissions=True, force=True)

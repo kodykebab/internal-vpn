@@ -4,13 +4,13 @@
 
 The review uses only `ubuntu-dev`, the VPN app's separate `test.local` database, and Central's existing development `test.local` site. [INTEGRATION.md](INTEGRATION.md) describes the exact Central topology, exercised files and remaining ingress gap.
 
-- **11 focused updater tests passed**, locally and on Ubuntu.
-- **85 live expected-result checks passed** in the expanded run, which covers the real VPN API/database, root updater, WireGuard namespaces and actual Central HTTPS backend. See `lab-results.json` for individual observations and `central-results.json` for Central results/source hashes.
-- **11 existing Central integration tests passed:** 3 in `central.tests.test_guards`, 8 in `central.tests.test_iam`.
+- **16 focused updater/topology tests passed**, locally and on Ubuntu.
+- **96 live expected-result checks passed** in the expanded run, which covers the real VPN API/database, root updater, WireGuard namespaces and actual Central HTTPS backend. See `lab-results.json` for individual observations and `central-results.json` for Central results/source hashes.
+- **11 existing Central integration tests passed in the preceding review (not rerun for this topology change):** 3 in `central.tests.test_guards`, 8 in `central.tests.test_iam`.
 
 A bootstrap rerun also preserved the existing Administrator password hash and network revision. Python syntax, JSON, Markdown links/fences and whitespace checks passed.
 
-Expected-result checks include observed shortcomings and cleanup. In particular, non-VPN Central admin access and the unresolved permanent-host-retirement behavior are recorded as gaps. A successful test run does not mean those issue requirements are satisfied.
+Expected-result checks include observed shortcomings and cleanup. In particular, non-VPN Central admin access is recorded as a gap; hub-only retirement now passes. A successful test run does not mean those issue requirements are satisfied.
 
 Runtime: application Python 3.14.6, updater Python 3.12.3, Linux `6.8.0-142-generic`, wireguard-tools `1.0.20210914`, Frappe checkout HEAD `249b5f0f481989f7481a0244d1b2862d559b165a`. Central's runtime is an unversioned copy; do not attribute its tests to the local checkout. Exact file hashes and the differences are in INTEGRATION.md.
 
@@ -33,14 +33,20 @@ Omit `--central` for just the VPN scenario. Central's existing test commands are
 | Input and application authority | Guest denial; explicit login exception; legacy command dispatch; generic resources; other engineer/host access; generic DocType writes with spoofed flags; malformed key/subnet/endpoint values and strict report/enablement types |
 | Transaction consistency | Unique addresses/revisions under concurrent enrollment; current locking reads; explicit retry of rolled-back conflicts; invalid requests leave the revision unchanged |
 | User lifecycle | Profile edits preserve credentials and revision; role removal removes network access and config authority; role restoration plus reconnect works; owner disablement rejects both tunnel access and API credentials |
-| Privilege and transport | Non-root Frappe; root-owned installed updater; app user denied WireGuard mutation; concurrent updater serialization; direct service/device traffic; unknown keys and source spoofing denied |
+| Privilege and transport | Non-root Frappe; root-owned installed updater; app user denied WireGuard mutation; concurrent updater serialization; hub-routed service/device traffic, pinned single-peer spokes, source-preserving forwarding and outside-subnet firewall denial; unknown keys and source spoofing denied |
 | Ordering and application | Accepted revision persists before mutation; stale/conflicting responses rejected; no cached replay when the controller is unavailable; private key ownership checked; missing interface reports failure; recreated interface reconciles current peers |
-| Revocation | Pending/partial/full removal; outdated acknowledgements rejected; service traffic survives device removal; renewed session after re-enablement; rotated key succeeds and old key is absent |
+| Revocation | Pending removal and hub-only completed removal; outdated acknowledgements rejected; service traffic survives device removal; renewed session after re-enablement; rotated key succeeds and old key is absent |
 | Real Central | Correct authenticated profile, separate credentials, role/team/capability preservation, valid operator access, public customer flow, actual connection failure after VPN removal |
-| Known gaps | Authorized operator still reaches Central admin API without VPN; drained/disabled service can block acknowledgement of a later unrelated revision |
+| Known gaps | Authorized operator still reaches Central admin API without VPN |
 | Cleanup | Temporary users/peers, keys, updater files, namespace processes, relays and namespaces removed; reusable lab remains |
 
 The focused updater tests substitute controller/WireGuard calls to inspect specific failure boundaries. Live tests execute the real API, database and WireGuard commands. They serve different purposes; their counts are not independent acceptance coverage.
+
+## Hub branch change
+
+`mesh-direct-peers` preserves the original mesh implementation at `056e307`. The `main` branch uses a single Central hub under the agreed 100% uptime assumption. The new tests verify single-peer spokes, `/32` hub authorizations, refusal of broader routes/unpinned hubs, spoke-to-spoke forwarding, loss of spoke paths when hub forwarding is disabled, source preservation without SNAT, and firewall rejection of outside-subnet forwarding. Only the hub needs a new configuration for member removal. Unchanged spoke reports remain current and retired spokes no longer block future revisions.
+
+The first live run caught a Frappe Document/dictionary mismatch in snapshot construction; normalization now occurs at the API boundary. A source-address fixture initially could not read its script as `nobody`; it now receives the nonsecret fixture code directly. Both required rerunning the full scenario.
 
 ## Findings corrected during review
 
@@ -56,6 +62,8 @@ An attempted generic save with client-supplied permission/mutation flags was rej
 ## Test corrections and limits
 
 The initial User-list authorization assertion was wrong: Frappe has a User-name selection path. The final operator-only check uses System Settings and verifies both denial and success against its actual role permissions.
+
+Recreating the hub interface discards learned endpoints and sessions. The restart check explicitly reconnects a spoke before verifying traffic and does not establish an automatic recovery deadline.
 
 Re-enabling an existing WireGuard peer did not restore an old session within the original one-second check. The passing re-enablement test explicitly reconnects. It does not promise immediate old-session recovery.
 
@@ -73,4 +81,4 @@ The suite runs on one machine with loopback UDP endpoints. Earlier NAT experimen
 
 The test runner creates fresh fixture users, using an explicit run ID, and removes only those users. Private keys and API credentials are temporary and do not enter result artifacts. The generated result files contain booleans and source hashes and are ignored by Git.
 
-The reusable VPN bench/site/database and its separate Redis process remain available. Central test users and its additional server/relays/Redis are temporary. Existing `wg0`, the three original VM/management namespaces and application services are preserved. No source changes were made in Central, Atlas, Cargo or Pilot, and no commit or push was made.
+The reusable VPN bench/site/database and its separate Redis process remain available. Central test users and its additional server/relays/Redis are temporary. Existing `wg0`, the three original VM/management namespaces and application services are preserved. No source changes were made in Central, Atlas, Cargo or Pilot, and local commits preserve the two implementations; no push was made.

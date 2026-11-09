@@ -23,11 +23,11 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def validate_snapshot(data, local):
-    if set(data) != {"version", "name", "revision", "subnet", "address", "public_key", "peers"}:
+    if set(data) != {"version", "topology", "name", "revision", "subnet", "address", "public_key", "peers"}:
         raise ValueError("Unexpected configuration fields")
-    if type(data["version"]) is not int or data["version"] != 1 or type(data["revision"]) is not int or data["revision"] < 1:
+    if type(data["version"]) is not int or data["version"] != 2 or type(data["revision"]) is not int or data["revision"] < 1:
         raise ValueError("Invalid configuration version")
-    for field in ("name", "subnet", "address", "public_key"):
+    for field in ("topology", "name", "subnet", "address", "public_key"):
         if data[field] != local[field]:
             raise ValueError("Host identity or network changed; local reprovisioning required")
     network = validation.subnet(data["subnet"])
@@ -37,9 +37,13 @@ def validate_snapshot(data, local):
         raise ValueError("Invalid local address")
     if not isinstance(data["peers"], list) or len(data["peers"]) > 10000:
         raise ValueError("Invalid peer list")
+    if data["topology"] not in ("hub", "spoke"):
+        raise ValueError("Unknown topology")
+    if data["topology"] == "spoke" and len(data["peers"]) > 1:
+        raise ValueError("A spoke may connect only to the pinned hub")
     keys, addresses = {data["public_key"]}, {data["address"]}
     for peer in data["peers"]:
-        if set(peer) != {"public_key", "address", "endpoint"}:
+        if set(peer) != {"public_key", "address", "endpoint", "allowed_ips"}:
             raise ValueError("Unexpected peer fields")
         key = validation.public_key(peer["public_key"])
         if not isinstance(peer["address"], str):
@@ -51,7 +55,12 @@ def validate_snapshot(data, local):
             raise ValueError("Duplicate key or address")
         keys.add(key)
         addresses.add(str(address))
-        if peer["endpoint"] is not None:
+        if data["topology"] == "hub":
+            if peer["allowed_ips"] != peer["address"] + "/32" or peer["endpoint"] is not None:
+                raise ValueError("Hub peers require individual addresses and learned endpoints")
+        else:
+            if key != local.get("hub_public_key") or peer["allowed_ips"] != str(network):
+                raise ValueError("Only the pinned hub may route the allocated subnet")
             validation.endpoint(peer["endpoint"])
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -99,7 +108,7 @@ def apply(data, local):
     for key in sorted(existing - wanted):
         wg(local, "set", interface, "peer", key, "remove")
     for peer in data["peers"]:
-        arguments = ["set", interface, "peer", peer["public_key"], "allowed-ips", peer["address"] + "/32",
+        arguments = ["set", interface, "peer", peer["public_key"], "allowed-ips", peer["allowed_ips"],
                      "persistent-keepalive", "25" if peer["endpoint"] else "0"]
         if peer["endpoint"]:
             arguments += ["endpoint", peer["endpoint"]]

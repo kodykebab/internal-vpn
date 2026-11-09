@@ -13,7 +13,8 @@
     "enabled",
     "reported_revision",
     "apply_success",
-    "reported_at"
+    "reported_at",
+    "reported_digest"
   ],
   "fields": [
     {
@@ -69,6 +70,12 @@
       "fieldname": "reported_at",
       "label": "Reported At",
       "fieldtype": "Datetime"
+    },
+    {
+      "fieldname": "reported_digest",
+      "label": "Reported Configuration Digest",
+      "fieldtype": "Data",
+      "read_only": 1
     }
   ],
   "permissions": [

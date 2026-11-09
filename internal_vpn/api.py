@@ -1,6 +1,6 @@
 import frappe
 
-from internal_vpn import validation
+from internal_vpn import topology, validation
 
 
 def require_role(role):
@@ -66,7 +66,7 @@ def initialize(subnet):
 def register(kind, public_key, user=None, endpoint=None):
     if kind == "Service":
         require_role("VPN Manager")
-        endpoint = validated(validation.endpoint, endpoint)
+        endpoint = validated(validation.endpoint, endpoint) if endpoint is not None else None
         if not user or "VPN Host" not in frappe.get_roles(user):
             raise frappe.ValidationError("Service requires a VPN Host user")
     elif kind == "Device":
@@ -96,6 +96,21 @@ def register(kind, public_key, user=None, endpoint=None):
 
 
 @frappe.whitelist(methods=["POST"])
+def set_hub(name):
+    require_role("VPN Manager")
+    network = locked_network()
+    if network.hub and network.hub != name:
+        raise frappe.ValidationError("Hub replacement requires explicit reprovisioning; failover is out of scope")
+    peer = frappe.get_doc("VPN Peer", name, for_update=True)
+    if peer.kind != "Service" or not active(peer) or not peer.endpoint:
+        raise frappe.ValidationError("Hub must be an active service with a reachable UDP endpoint")
+    if not network.hub:
+        frappe.db.set_value("VPN Network", "default", "hub", name)
+        advance(network)
+    return {"hub": name}
+
+
+@frappe.whitelist(methods=["POST"])
 def update_peer(name, enabled=None, public_key=None, endpoint=None):
     manager = "VPN Manager" in frappe.get_roles()
     if not manager:
@@ -108,6 +123,8 @@ def update_peer(name, enabled=None, public_key=None, endpoint=None):
     if enabled is not None:
         if type(enabled) not in (bool, int, str) or enabled not in (0, 1, "0", "1"):
             raise frappe.ValidationError("enabled must be 0 or 1")
+        if name == network.hub and not int(enabled):
+            raise frappe.ValidationError("The configured hub must remain enabled")
         peer.enabled = int(enabled)
     if public_key is not None:
         peer.public_key = validated(validation.public_key, public_key)
@@ -133,14 +150,23 @@ def configuration(name):
         raise frappe.PermissionError("VPN identity required")
     network = locked_network()
     peer = own_peer(name)
-    peers = []
-    if active(peer):
-        for other in current_peers():
-            if other.name != name and active(other):
-                peers.append({"public_key": other.public_key, "address": other.address,
-                              "endpoint": other.endpoint or None})
-    return {"version": 1, "name": peer.name, "revision": network.revision, "subnet": network.subnet,
-            "address": peer.address, "public_key": peer.public_key, "peers": peers}
+    hub, members = membership(network)
+    return snapshot(peer, network, hub, members)
+
+
+def membership(network):
+    peers = current_peers()
+    members = [peer for peer in peers if active(peer)]
+    hub = next((peer for peer in members if peer.name == network.hub), None)
+    if not hub:
+        raise frappe.ValidationError("Select an active hub before configuring the network")
+    return hub, members
+
+
+def snapshot(peer, network, hub, members):
+    identity = {"name": peer.name, "public_key": peer.public_key, "address": peer.address}
+    return topology.configuration(identity, hub, members, network.subnet, network.revision,
+                                  any(member.name == peer.name for member in members))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -156,8 +182,11 @@ def report(name, revision, success):
         raise frappe.PermissionError("Only service hosts report application")
     if revision != network.revision:
         raise frappe.ValidationError("Outdated application report; fetch current configuration")
+    hub, members = membership(network)
+    digest = topology.desired_digest(snapshot(peer, network, hub, members))
     frappe.db.set_value("VPN Peer", name, {
         "reported_revision": revision, "apply_success": int(success),
+        "reported_digest": digest if success else None,
         "reported_at": frappe.utils.now_datetime(),
     }, update_modified=False)
     return {"accepted": True}
@@ -167,12 +196,23 @@ def report(name, revision, success):
 def status():
     require_role("VPN Manager")
     network = locked_network()
+    if not network.hub:
+        return {"revision": network.revision, "hub": None, "hub_current": False, "hosts": [], "all_current": False}
+    hub, members = membership(network)
+    active_names = {member.name for member in members}
     fields = ("name", "enabled", "reported_revision", "apply_success", "reported_at")
-    hosts = [frappe._dict({field: peer[field] for field in fields})
-             for peer in current_peers() if peer.kind == "Service"]
-    for host in hosts:
-        host["current"] = bool(host.apply_success and host.reported_revision == network.revision)
-    return {"revision": network.revision, "hosts": hosts, "all_current": bool(hosts) and all(h.current for h in hosts)}
+    hosts = []
+    for peer in current_peers():
+        if peer.kind != "Service":
+            continue
+        host = frappe._dict({field: peer[field] for field in fields})
+        host["required"] = peer.name in active_names
+        digest = topology.desired_digest(snapshot(peer, network, hub, members))
+        host["current"] = bool(peer.apply_success and peer.reported_digest == digest)
+        hosts.append(host)
+    hub_current = next(host.current for host in hosts if host.name == network.hub)
+    return {"revision": network.revision, "hub": network.hub, "hub_current": hub_current, "hosts": hosts,
+            "all_current": all(host.current for host in hosts if host.required)}
 
 
 def user_changed(doc, method=None):
@@ -186,5 +226,9 @@ def user_changed(doc, method=None):
     if not frappe.db.exists("DocType", "VPN Network") or not frappe.db.exists("VPN Network", "default"):
         return
     network = locked_network()
-    if any(peer.user == doc.name and peer.enabled for peer in current_peers()):
+    peers = current_peers()
+    hub_user = next((peer.user for peer in peers if peer.name == network.hub), None)
+    if hub_user == doc.name and (method == "on_trash" or not doc.enabled or "VPN Host" not in {row.role for row in doc.roles}):
+        raise frappe.ValidationError("The hub account must remain enabled with VPN Host authority")
+    if any(peer.user == doc.name and peer.enabled for peer in peers):
         advance(network)

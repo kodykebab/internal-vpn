@@ -1,6 +1,6 @@
 # Internal VPN plan
 
-Status: the separate control-plane PoC works with direct WireGuard peers and a real Central development backend. It does **not** yet enforce Central's public/private ingress boundary. Atlas/Cargo application integration and observability remain unimplemented.
+Status: the separate control-plane PoC works with hub-routed WireGuard peers and a real Central development backend. It does **not** yet enforce Central's public/private ingress boundary. Atlas/Cargo application integration and observability remain unimplemented.
 
 ## Requirements and authority
 
@@ -8,13 +8,13 @@ Status: the separate control-plane PoC works with direct WireGuard peers and a r
 
 | Requirement | Current evidence | Remaining acceptance |
 | --- | --- | --- |
-| Service-to-service connectivity | Two service namespaces communicate directly; a service peer reaches the real Central test backend | Actual deployed Central/Atlas/Cargo callers, DNS/TLS and cross-region paths |
+| Service-to-service connectivity | Two service spokes communicate through the Central hub namespace; a service peer reaches the real Central test backend | Actual deployed Central/Atlas/Cargo callers, DNS/TLS and cross-region paths |
 | Engineer registration/access | Real Frappe API enrollment creates usable tunnels; access to real Central is verified | Employee login/bootstrap and operator onboarding procedure |
 | Desk/internal endpoints VPN-only | A VPN-bound Central listener works; Central still serves an operator-only API on the non-VPN listener | Protect actual internal operations and backend paths while retaining customer traffic |
 | Separate app, later merge into Central | Separate Frappe app/site; no changes to Central source | Define the later migration only when requested |
 | `100.64.0.0/10` addressing | Pool validation and serialized unique allocation; lab uses `100.100.64.0/24` | Check a deployment allocation against host, region, engineer and existing VPN networks |
 | Service and engineer identities | Separate Frappe roles; dedicated host users; engineer-owned device records | Decide how approved employees receive enrollment authority; ordinary Central login is insufficient |
-| Broad initial VPN access | Membership distributed without resource ACLs | Real reachable endpoints; engineer-to-engineer reachability is not provided automatically through NAT |
+| Broad initial VPN access | Hub forwards between enrolled members without resource ACLs | Real hub reachability and deployed device-to-device acceptance |
 | Guest denial, including realtime, in the separate app | Guest API/resource denial; Socket.IO polling/upgrades disabled entirely | Working browser login/assets and authenticated realtime if realtime is enabled later |
 | Datum, Insights alerts, Raven | Earlier ingestion experiments only; no collector in this PoC | Collect real measurements, ingest, query, trigger and deliver a test alert |
 
@@ -22,9 +22,9 @@ The handoff's open placement/addressing questions and mandatory initial granular
 
 ## Chosen PoC boundary
 
-Use a separate Frappe management app, normal Frappe Users/API credentials, and a dedicated WireGuard interface on each service host. Service hosts peer directly. Engineer devices initiate to reachable service endpoints. The control plane distributes membership and carries no application traffic.
+Use a separate Frappe management app, normal Frappe Users/API credentials, and a dedicated WireGuard interface on each service host. Central’s host is the single WireGuard hub. All other service hosts and engineer devices initiate to it; spokes have no direct peers. The non-root management app distributes configuration; the host kernel forwards VPN traffic. Central’s host, WireGuard and connectivity are assumed to have 100% uptime, so HA/failover is outside scope.
 
-Keep Atlas/Metal's regional IPv6 interfaces and the customer VPN under their existing owners. Prior experiments showed that their peer reconciliation can replace IPv4 AllowedIPs added by another owner. A dedicated interface avoids that ownership conflict without adding a hub.
+Keep Atlas/Metal's regional IPv6 interfaces and the customer VPN under their existing owners. Prior experiments showed that their peer reconciliation can replace IPv4 AllowedIPs added by another owner. A dedicated interface avoids that ownership conflict while the separate interface supplies the internal hub network.
 
 ```text
 Engineer identity --> VPN app <-- Service identity
@@ -33,22 +33,22 @@ Engineer identity --> VPN app <-- Service identity
                          |
                   root host updater
 
-Engineer device -- WireGuard --> Central / Atlas / Cargo hosts
-Service hosts   -- WireGuard --> other enrolled service hosts
+Engineer device -- WireGuard --> Central hub -- WireGuard --> Atlas / Cargo
+Service spoke   -- WireGuard --> Central hub -- WireGuard --> other spokes
 ```
 
 The service app stays non-root. Host provisioning owns the private key, interface/address/route, UDP port and updater installation. The updater accepts public peer data only. Interface selection, file paths and executable commands never come from the API. Exact contracts and commands are in [README.md](README.md).
 
-No hub, relay, network ACL engine, custom dashboard, background reconciliation queue, automatic rollback, checkpoints, recovery orchestration or production HA is included. Reconsider these only against a concrete requirement or observed failure boundary.
+No additional relay, network ACL engine, custom dashboard, background reconciliation queue, automatic rollback, checkpoints, recovery orchestration or production HA is included. Reconsider these only against a concrete requirement or observed failure boundary.
 
 ## State and lifecycle invariants
 
 | State | Owner and reason |
 | --- | --- |
-| `VPN Network` subnet/revision | One management record serializes allocation, membership snapshots and reporting. Current locking reads prevent a pre-existing Frappe transaction snapshot from mixing old membership with a newer revision. |
+| `VPN Network` subnet/revision/hub | One management record serializes allocation, membership snapshots and reporting. Current locking reads prevent a pre-existing Frappe transaction snapshot from mixing old membership with a newer revision. |
 | `VPN Peer` identity/key/address/enabled | A service or device has an explicit owner and unique key/address. Disabled records reserve their addresses while old host configurations may exist. |
 | Host's accepted revision/digest | A root-owned watermark rejects stale or conflicting snapshots, including after partial application or process restart. It is not a configuration cache to replay. |
-| Host's application report | Existing fields on its service record distinguish current acknowledgement from pending/failed application. They do not establish live reachability. |
+| Host's application report | The service record’s desired-state digest excludes the global revision so unrelated membership changes do not invalidate unchanged spokes. `hub_current` tracks the hub’s membership acknowledgement; `all_current` tracks active services. They do not establish live reachability. |
 | Existing application permissions | Central IAM and the other services' own authentication/authorization remain authoritative after packets arrive through the VPN. |
 
 User enablement and relevant VPN-role changes advance membership when they affect enabled peers. Profile edits and changes to owners whose peers are all disabled do not. Generic document mutation cannot bypass the membership API.
@@ -59,7 +59,9 @@ Concurrent Frappe transactions may return HTTP 508 `QueryDeadlockError`. Retry t
 
 Device removal, role removal and owner disablement are tested. Re-enabling a removed device may require a fresh WireGuard session. Authorized owners can manage their devices; disabling a device is not a permanent ban on its still-authorized owner enrolling again.
 
-**Retirement remains a design task:** disabled service records still participate in application reporting. Permanently removing a host needs a clear completion rule before it can stop reporting. Otherwise later revisions can remain pending forever. Do not silently exclude a disabled host that might retain old permissions, or add a retention/recovery subsystem to solve this narrow lifecycle question.
+**Retirement follows hub removal:** disabling a member changes the hub's `/32` peer set. Once the hub acknowledges removal, the member cannot reach other VPN members even if its local spoke configuration remains stale. Disabled services are excluded from required acknowledgements; addresses remain reserved. This requires removing all prior direct peer relationships. The selected hub cannot be retired or replaced through ordinary membership edits.
+
+The direct implementation is preserved on `mesh-direct-peers` at `056e307`; `main` uses protocol v2. No populated mesh migration or mixed-topology deployment is supplied. The lab schema helper refuses populated membership.
 
 ## Central integration boundary
 
@@ -97,7 +99,7 @@ Exit: the currently observed non-VPN admin access fails for the intended network
 - [ ] Adapt each application's actual authentication and routes independently; do not copy Central exceptions blindly.
 - [ ] Install/test the dedicated interface and root updater through the host's existing provisioning owner.
 - [ ] Exercise the supplied systemd oneshot/timer under its intended permissions; current live tests run the updater executable directly.
-- [ ] Define service key replacement and permanent retirement completion without inventing a general recovery system.
+- [ ] Document service key replacement and hub reprovisioning; hub-only retirement is implemented and tested.
 - [ ] Verify management API bootstrap remains reachable before VPN setup and during membership changes.
 
 Exit: repeatable installation/startup and honest failure/removal behavior for the selected development topology.
@@ -114,14 +116,14 @@ A recent handshake does not prove reachability, and an idle engineer laptop is n
 ### Deployment acceptance
 
 - [ ] Confirm real address availability, UDP/NAT reachability, DNS/TLS, MTU and cross-region paths.
-- [ ] Measure configuration size, lock contention, convergence and expected traffic volume; the global revision/full peer distribution is a small-PoC design.
+- [ ] Measure configuration size, lock contention, convergence and expected traffic volume; the global revision/hub peer distribution is a small-PoC design.
 - [ ] Verify deployed application/proxy and Insights/Raven revisions.
 
 Only `ubuntu-dev` is available. Actual cross-region acceptance remains later work and is not inferred from namespaces.
 
 ## Review and evidence
 
-The latest review exercised 11 focused updater tests, 85 live expected-result checks including Central, and 11 existing Central IAM/guard integration tests. These include failures observed as expected and cleanup; they are not independent production acceptance tests. [TESTING.md](TESTING.md) records the commands, revisions, corrections and limitations.
+The latest review exercised 16 focused updater/topology tests and 96 live expected-result checks including Central. The preceding review also passed 11 existing Central IAM/guard integration tests. These include failures observed as expected and cleanup; they are not independent production acceptance tests. [TESTING.md](TESTING.md) records the commands, revisions, corrections and limitations.
 
 Review fixes include correctly creating Frappe test credentials, rejecting malformed API types as client errors, authorizing before peer lookup, avoiding unnecessary membership revisions, reporting an empty network as not ready, and avoiding a false claim that a failed report means nothing was applied. The installer no longer force-reinstalls apps merely because a local marker is missing.
 
@@ -129,4 +131,4 @@ Earlier direct/NAT/ownership and Datum experiments remain supporting evidence in
 
 ## Working constraints
 
-Keep the project separate. Use `ubuntu-dev` and only `test.local` for Frappe tests. Preserve existing host interfaces, VM namespaces, applications, source changes, databases and disks outside the explicitly created fixtures. No staging/production changes, commits, pushes or remote repository creation are included. Review material scope/architecture changes before adding new subsystems.
+Keep the project separate. Use `ubuntu-dev` and only `test.local` for Frappe tests. Preserve existing host interfaces, VM namespaces, applications, source changes, databases and disks outside the explicitly created fixtures. Local commits/branches preserve the mesh implementation and establish the hub implementation as requested. No staging/production changes, pushes or remote repository creation are included. Review material scope/architecture changes before adding new subsystems.
