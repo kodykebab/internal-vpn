@@ -16,7 +16,7 @@ Status: the separate control-plane PoC works with hub-routed WireGuard peers and
 | Service and engineer identities | Separate Frappe roles; dedicated host users; engineer-owned device records | Decide how approved employees receive enrollment authority; ordinary Central login is insufficient |
 | Broad initial VPN access | Hub forwards between enrolled members without resource ACLs | Real hub reachability and deployed device-to-device acceptance |
 | Guest denial, including realtime, in the separate app | Guest API/resource denial; Socket.IO polling/upgrades disabled entirely | Working browser login/assets and authenticated realtime if realtime is enabled later |
-| Datum, Insights alerts, Raven | Earlier ingestion experiments only; no collector in this PoC | Collect real measurements, ingest, query, trigger and deliver a test alert |
+| Datum, Insights alerts, Raven | Local sampler emits handshake age, traffic counters, probe results and updater execution state; no ingestion/alerts yet | Collect real measurements, ingest, query, trigger and deliver a test alert |
 
 The handoff's open placement/addressing questions and mandatory initial granular ACLs are superseded by the issue comment. The guest-denial requirement for the separate app must not become a blanket public API or Socket.IO ban on Central.
 
@@ -98,15 +98,18 @@ Exit: the currently observed non-VPN admin access fails for the intended network
 
 - [ ] Adapt each application's actual authentication and routes independently; do not copy Central exceptions blindly.
 - [ ] Install/test the dedicated interface and root updater through the host's existing provisioning owner.
-- [ ] Exercise the supplied systemd oneshot/timer under its intended permissions; current live tests run the updater executable directly.
-- [ ] Document service key replacement and hub reprovisioning; hub-only retirement is implemented and tested.
+- [x] Exercise the supplied systemd oneshot/timer under its intended permissions using isolated runtime units on `ubuntu-dev`.
+- [ ] Verify permanent installation and whole-host startup ordering with the actual interface provisioning owner.
+- [x] Document and exercise service key replacement, host API-secret rotation and same-record hub rekeying with explicit pin updates. Hub-only retirement is implemented and tested.
+- [ ] Integrate persistent key/credential provisioning and verify it across whole-host restart.
 - [ ] Verify management API bootstrap remains reachable before VPN setup and during membership changes.
 
 Exit: repeatable installation/startup and honest failure/removal behavior for the selected development topology.
 
 ### 4. Implement observability
 
-- [ ] Collect handshake age, traffic counters, application failures and active service probes/latency.
+- [x] Collect local handshake age, traffic counters, optional ICMP reachability/latency and updater execution outcomes without a new worker.
+- [ ] Integrate authenticated application probes; ICMP reachability alone is insufficient.
 - [ ] Send actual measurements through Datum's existing authenticated ingestion API.
 - [ ] Query ClickHouse through Insights and exercise a failed-probe alert.
 - [ ] Deliver through Insights' existing webhook channel to a designated test Raven destination.
@@ -114,6 +117,8 @@ Exit: repeatable installation/startup and honest failure/removal behavior for th
 A recent handshake does not prove reachability, and an idle engineer laptop is not necessarily failed infrastructure. Metric names, scrape interval, thresholds and an operational revocation deadline remain to be defined. Upstream Insights' inspected HTTPS webhook transport rejects non-global destinations, including `100.64.0.0/10`; verify the deployed version/destination before choosing a VPN-only Raven endpoint.
 
 ### Deployment acceptance
+
+The optional bounded lab scenario covers a 64-record membership increase, four concurrent enrollments, capped spoke-to-spoke TCP, overlay delay/loss and reduced hub MTU. These checks support the design but do not close the deployment acceptance items below.
 
 - [ ] Confirm real address availability, UDP/NAT reachability, DNS/TLS, MTU and cross-region paths.
 - [ ] Measure configuration size, lock contention, convergence and expected traffic volume; the global revision/hub peer distribution is a small-PoC design.
@@ -123,7 +128,7 @@ Only `ubuntu-dev` is available. Actual cross-region acceptance remains later wor
 
 ## Review and evidence
 
-The latest review exercised 16 focused updater/topology tests and 96 live expected-result checks including Central. The preceding review also passed 11 existing Central IAM/guard integration tests. These include failures observed as expected and cleanup; they are not independent production acceptance tests. [TESTING.md](TESTING.md) records the commands, revisions, corrections and limitations.
+The latest review exercised 24 focused updater/topology/measurement tests and 157 live expected-result checks including Central. The preceding review also passed 11 existing Central IAM/guard integration tests. These include failures observed as expected and cleanup; they are not independent production acceptance tests. [TESTING.md](TESTING.md) records the commands, revisions, corrections and limitations.
 
 Review fixes include correctly creating Frappe test credentials, rejecting malformed API types as client errors, authorizing before peer lookup, avoiding unnecessary membership revisions, reporting an empty network as not ready, and avoiding a false claim that a failed report means nothing was applied. The installer no longer force-reinstalls apps merely because a local marker is missing.
 

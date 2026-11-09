@@ -5,3 +5,5 @@ __pycache__/
 lab-results.json
 central-results.json
 *.egg-info/
+lab-timings.json
+lab-network.json

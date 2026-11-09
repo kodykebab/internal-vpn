@@ -15,9 +15,10 @@ The first slice is implemented and tested on `ubuntu-dev`. [PLAN.md](PLAN.md) re
 - Structured per-host configuration; host credentials cannot administer membership or fetch another host's configuration.
 - A serialized updater with TLS verification, strict peer validation, local key/interface ownership, persisted revision ordering, and application reports.
 - Guest denial on the management app. Realtime is disabled entirely in the supplied WSGI entrypoint; both polling and upgrade requests are rejected. The login API is the bootstrap exception. No custom UI is built.
+- A read-only [measurement command](deploy/METRICS.md) for handshake age, traffic counters, explicit VPN ICMP probes and optional systemd updater results.
 - Reproducible tests using a real Frappe HTTPS server, MariaDB, kernel WireGuard, three simulated services (one hub and two spokes), and an engineer device.
 
-Not implemented: VPN gates on actual Central/Atlas/Cargo routes, production provisioning, a working authenticated realtime service, Datum collection, Insights/Raven delivery, actual cross-region acceptance, and fleet-scale capacity measurements. The hub routes the allocated VPN subnet without resource ACLs or source NAT. Spokes initiate to the hub and need no published endpoint. The hub endpoint must currently be numeric IPv4.
+Not implemented: VPN gates on actual Central/Atlas/Cargo routes, production provisioning, a working authenticated realtime service, Datum ingestion, Insights/Raven delivery, actual cross-region acceptance, and fleet-scale capacity measurements. The hub routes the allocated VPN subnet without resource ACLs or source NAT. Spokes initiate to the hub and need no published endpoint. The hub endpoint must currently be numeric IPv4.
 
 ## Run on ubuntu-dev
 
@@ -31,7 +32,7 @@ cd /home/vagrant/internal-vpn
 python3 -m unittest discover -s tests -v
 /home/vagrant/atlas-stack/bench/env/bin/python lab/verify.py
 # Include the real Central development backend:
-/home/vagrant/atlas-stack/bench/env/bin/python lab/verify.py --central
+/home/vagrant/atlas-stack/bench/env/bin/python lab/verify.py --central --systemd --network
 ```
 
 For an existing **empty** mesh lab database, run `lab/migrate_hub.py` with the same Frappe Python runtime before verification. It refuses a populated database; this is schema setup for the disposable PoC, not a deployment migration.
@@ -50,7 +51,7 @@ Retained development resources:
 
 Each verification run starts a non-root HTTPS server on `127.0.0.1:18441`, copies the updater/configuration into a root-owned `/run/internal-vpn-poc-*` directory, and creates `ivpn-poc-*` network namespaces. Private WireGuard keys are generated locally and never sent to the app. The lab subnet is `100.100.64.0/24`; this is not a deployment allocation. WireGuard UDP sockets are born in the host namespace and use loopback endpoints on ports `56441`–`56445`.
 
-The runner stops its HTTP processes and removes its namespaces, root updater directory, private keys, and test users/peers in `finally`. It retains the reusable bench, database/schema, Redis process, TLS material, logs, and `lab-results.json`. Do not run two copies of the lab runner concurrently; the lab ports are fixed. The updater itself is serialized and is tested with concurrent invocations.
+The workerless lab discards its framework fixture jobs from its dedicated Redis queue between runs; it does not execute or verify those background jobs. The runner stops its HTTP processes and removes its namespaces, root updater directory, private keys, and test users/peers in `finally`. It retains the reusable bench, database/schema, Redis process, TLS material, logs, `lab-results.json`, `lab-timings.json`, and `lab-network.json`. Do not run two copies of the lab runner concurrently; the lab ports are fixed. The updater itself is serialized and is tested with concurrent invocations.
 
 Existing `wg0`, VM namespaces, application services, proxy rules, and source repositories are not part of the PoC's mutation scope.
 
@@ -96,7 +97,7 @@ Revocation is complete at the routing boundary after the hub successfully remove
 
 ### Host installation contract
 
-The runnable lab installs its own root-owned updater copy and exercises it directly. `deploy/` contains a proposed systemd oneshot/timer with a 15-second interval; these units are not enabled or integration-tested in this slice.
+The lab exercises both the root-owned updater directly and, with `--systemd`, the supplied oneshot/timer using temporary runtime units and the production sandbox settings. Systemd creates private state storage; the timer requests refresh 15 seconds after completion with one-second accuracy. See [deployment instructions and test boundaries](deploy/README.md). Permanent installation and whole-host boot ordering remain deployment work.
 
 For a real host, provisioning must create the dedicated interface, local private key, assigned address/route, UDP listener/firewall rule, and root-owned updater/configuration. Do not share ownership with Atlas/Metal interfaces. The updater does not accept interface names, file paths, private keys, shell commands, or hooks from the API.
 

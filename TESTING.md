@@ -4,8 +4,8 @@
 
 The review uses only `ubuntu-dev`, the VPN app's separate `test.local` database, and Central's existing development `test.local` site. [INTEGRATION.md](INTEGRATION.md) describes the exact Central topology, exercised files and remaining ingress gap.
 
-- **16 focused updater/topology tests passed**, locally and on Ubuntu.
-- **96 live expected-result checks passed** in the expanded run, which covers the real VPN API/database, root updater, WireGuard namespaces and actual Central HTTPS backend. See `lab-results.json` for individual observations and `central-results.json` for Central results/source hashes.
+- **24 focused updater/topology/measurement tests passed**, locally and on Ubuntu.
+- **157 live expected-result checks passed** in the expanded run, which covers the real VPN API/database, root updater, WireGuard namespaces and actual Central HTTPS backend. See `lab-results.json` for individual observations and `central-results.json` for Central results/source hashes.
 - **11 existing Central integration tests passed in the preceding review (not rerun for this topology change):** 3 in `central.tests.test_guards`, 8 in `central.tests.test_iam`.
 
 A bootstrap rerun also preserved the existing Administrator password hash and network revision. Python syntax, JSON, Markdown links/fences and whitespace checks passed.
@@ -21,10 +21,10 @@ On `ubuntu-dev`:
 ```sh
 cd /home/vagrant/internal-vpn
 python3 -m unittest discover -s tests -v
-/home/vagrant/atlas-stack/bench/env/bin/python lab/verify.py --central
+/home/vagrant/atlas-stack/bench/env/bin/python lab/verify.py --central --systemd --network
 ```
 
-Omit `--central` for just the VPN scenario. Central's existing test commands are in INTEGRATION.md. Frappe tests run only on `test.local`.
+Omit `--central` for just the VPN scenario. Omit `--systemd` to skip the eleven runtime-unit checks. Omit `--network` to skip the bounded peer-count and traffic-shaping scenario. Central's existing test commands are in INTEGRATION.md. Frappe tests run only on `test.local`.
 
 ## Review coverage
 
@@ -47,6 +47,68 @@ The focused updater tests substitute controller/WireGuard calls to inspect speci
 `mesh-direct-peers` preserves the original mesh implementation at `056e307`. The `main` branch uses a single Central hub under the agreed 100% uptime assumption. The new tests verify single-peer spokes, `/32` hub authorizations, refusal of broader routes/unpinned hubs, spoke-to-spoke forwarding, loss of spoke paths when hub forwarding is disabled, source preservation without SNAT, and firewall rejection of outside-subnet forwarding. Only the hub needs a new configuration for member removal. Unchanged spoke reports remain current and retired spokes no longer block future revisions.
 
 The first live run caught a Frappe Document/dictionary mismatch in snapshot construction; normalization now occurs at the API boundary. A source-address fixture initially could not read its script as `nobody`; it now receives the nonsecret fixture code directly. Both required rerunning the full scenario.
+
+## Systemd lifecycle coverage
+
+The optional `--systemd` scenario exercises the supplied service/timer templates with unique runtime paths on Ubuntu systemd 255. It verifies successful sandboxed application, private state creation, denial of application-user credential reads, rejection of unsafe configuration permissions, missing-interface failure, recovery on a timer activation, repair of peer drift, persisted revision state across service restarts, and removal of its runtime units/state.
+
+The unit now uses `StateDirectory` with mode `0700` rather than assuming a pre-created writable path. The timer sets one-second accuracy so the default scheduling slack does not dominate its fifteen-second interval. No additional worker or recovery subsystem was added.
+
+The lifecycle test temporarily moves an addressless disposable spoke interface into the host namespace, leaving host routes untouched, then restores it before the transport checks. The unit's capability and filesystem restrictions are unchanged. It copies the public CA certificate out of the home directory to respect `ProtectHome`. See [deployment notes](deploy/README.md) for exact installation and scope limits. This is not a whole-machine reboot or permanent provisioning test.
+
+## Key and credential lifecycle coverage
+
+The live runner also exercises service key replacement through the management API, hub removal of the old key, failure with stale local identity, and restoration after local key provisioning. Host API-secret rotation uses Frappe's normal User save path: the old credential is rejected, membership revision is unchanged, and an existing tunnel remains usable even though its updater can no longer authenticate. Installing the new token restores reconciliation/reporting.
+
+The final scenario rekeys the same hub record. It verifies old local identity and spoke pins reject the new configuration, old pins cannot reach the rekeyed hub, and explicit reprovisioning restores access while removing the old hub peer. Changing to another hub record is rejected. This does not test a production secret manager, persistent keys across reboot or automated distribution to employee devices.
+
+## Interruption and convergence coverage
+
+The live runner uses a root-owned, lab-only wrapper around the real updater. It pauses immediately after a successful WireGuard peer-removal command, or after application finishes but before sending the success report. The parent sends SIGKILL to that exact process. No production failure flag or recovery worker is introduced.
+
+Checks require the accepted revision to be persisted before either interruption. After interrupted removal, the key stays absent and tunnel access stays revoked; the next normal invocation completes application/reporting. After interruption before reporting, the tunnel can already work while `hub_current` remains false; the next invocation reconciles and acknowledges it. The test also confirms the process lock is released by termination. These are process-crash tests, not power-loss/filesystem durability tests or exhaustive interruption at every instruction.
+
+`lab-timings.json` records three direct API-to-acknowledgement samples each for disabling and re-enabling an existing engineer device, the next-run duration after both interruptions, and one timer-driven peer-drift repair sample. Direct samples include the membership HTTP request and an immediately invoked hub updater through its success report; they exclude the subsequent reachability probe. Timer repair ends when the kernel peer reappears, not when a report is accepted. All measurements use the one-host loopback lab and are observations, not a fleet percentile or revocation SLA. The generated timing artifact contains no credentials and is ignored by Git.
+
+Observed on `ubuntu-dev` in the latest run:
+
+| Measurement | Samples | Seconds |
+| --- | --- | --- |
+| Direct device revocation, API request through hub acknowledgement | 3 | 0.180, 0.169, 0.174 |
+| Direct device re-enablement, API request through hub acknowledgement | 3 | 0.175, 0.179, 0.193 |
+| Next normal run after interrupted removal | 1 | 0.147 |
+| Next normal run after interruption before reporting | 1 | 0.151 |
+| Timer-driven repair of removed spoke peer | 1 | 15.296 |
+
+## Measurement command coverage
+
+Focused tests check the read-only WireGuard command allowlist, cumulative-counter parsing, missing/future handshakes, identity/membership changes during reads, invalid probe targets, no-reply versus probe execution failure, systemd units without retained execution metadata (including an in-progress run whose Result has reset to success) and sanitized errors. Live checks exercise handshake observations, increasing counters after actual traffic, successful VPN probes, revoked-device no-reply, missing-interface collection failure, refusal of outside-subnet probes and successful/failed updater execution outcomes.
+
+The command emits no private keys, API tokens or raw subprocess error bodies. Probe traffic intentionally changes byte counters; sampling never changes configured peers or controller membership. See [METRICS.md](deploy/METRICS.md) for non-atomic sampling, counter resets and the distinction between collection success and service health.
+
+## Bounded scale and network-condition coverage
+
+The optional `--network` scenario registers 64 additional device records through the real API with four concurrent callers. It checks unique allocation/revisions, measures enrollment and hub snapshot/apply/report durations and JSON snapshot size, and confirms unchanged spokes still have one hub peer. It disables the batch, reapplies the hub, and checks removal without refreshing spokes. These additional peers exercise configuration size and reconciliation; they are not 64 independently active machines.
+
+A non-root TCP fixture transfers exactly 2 MiB from one service spoke to another through the hub, checking received length and SHA-256. Three runs use a 20 Mbit/s cap on both spoke egress interfaces: a baseline, 20 ms added delay plus 1% random loss on each spoke, and a reduced hub interface MTU. Queue counters must show actual dropped packets in the loss scenario, and ICMP samples must show the added delay. The reduced-MTU check sets only the hub to 1280, verifies a fitting DF packet passes and an oversized DF packet reports that MTU, then verifies TCP integrity after path-MTU discovery.
+
+The test applies `tc netem` only to the disposable WireGuard interfaces and restores qdiscs/MTUs before continuing. Its impairment is on overlay data packets, not the host UDP underlay or handshake path. `lab-network.json` records timings, sample goodput and configuration sizes; it is ignored by Git. A single shaped flow on one host does not measure maximum hub capacity, CPU saturation, fleet load, NAT behavior or actual WAN performance. No existing host interface, route or global traffic policy is changed.
+
+Observed in the bounded network run:
+
+| Measurement | Result |
+| --- | --- |
+| Additional device enrollments, four concurrent callers | 64 in 2.235 seconds |
+| Per-enrollment request duration, min / median / max (including explicit conflict retries) | 0.038 / 0.153 / 0.336 seconds |
+| Hub snapshot with 67 peers | 9,358 JSON bytes; fetched in 0.062 seconds |
+| Hub apply/report with 67 peers | 0.321 seconds |
+| Disable 64 peers / apply their removal | 1.568 / 0.264 seconds |
+| Baseline TCP goodput under 20 Mbit/s shaping | 19.19 Mbit/s |
+| TCP goodput with 20 ms delay and 1% loss on each spoke egress | 4.94 Mbit/s; 19 qdisc drops observed |
+| ICMP RTT under the impairment | 40.5–40.9 ms for four replies out of five probes |
+| TCP goodput with hub MTU 1280 | 19.14 Mbit/s; fitting/oversized DF behavior verified |
+
+Every TCP sample delivered exactly 2 MiB with matching SHA-256. These are single-run observations under an intentional cap, not maximum-throughput or fleet-capacity claims.
 
 ## Findings corrected during review
 
@@ -75,7 +137,17 @@ The byte relay preserves TLS and application credentials but does not preserve a
 
 The management app disables Socket.IO entirely. Its polling/upgrade denial tests do not prove functioning authenticated realtime.
 
-The suite runs on one machine with loopback UDP endpoints. Earlier NAT experiments are separate evidence; there is no actual cross-region acceptance or fleet-scale load test here. The systemd unit files remain proposed, not active deployment-tested units. No Datum collector or Insights/Raven notification pipeline is implemented.
+The suite runs on one machine with loopback UDP endpoints. Earlier NAT experiments are separate evidence; there is no actual cross-region acceptance or fleet-scale load test here. The supplied systemd units are exercised with temporary runtime units and production sandbox restrictions; permanent installation and whole-host boot ordering remain unverified. The local read-only sampler is implemented; no Datum ingestion adapter or Insights/Raven notification pipeline is implemented.
+
+## Consolidation review
+
+The review kept production scope to the local sampler and the two systemd template corrections; the additional scripts remain development fixtures. No new worker, persistent metric store, recovery orchestration or application ingress change was introduced.
+
+A targeted Ubuntu systemd check reproduced a failed oneshot (`Result=exit-code`, exit status 7), followed by a new invocation with `ActiveState=activating`, `Result=success` and a zero exit timestamp. The sampler already treated that timestamp as unknown; the focused regression now explicitly covers the activating state. The temporary review unit was removed. This check does not imply whole-host boot acceptance.
+
+## Repeated-run lab queue cleanup
+
+Repeated User lifecycle tests accumulated 550 framework jobs in the dedicated, workerless VPN Redis and caused Frappe QueueOverloaded errors, including fixture deletion. The lab now empties only that queue before fixtures and around teardown, guarded by the exact `test.local` site, `ivpn_poc` database and `127.0.0.1:16411` queue URL; it refuses cleanup if workers are registered. It does not touch Central's queue or other Redis instances. These discarded fixture jobs are not background-job integration coverage.
 
 ## Cleanup and artifacts
 

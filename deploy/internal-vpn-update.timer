@@ -4,6 +4,7 @@ Description=Refresh internal VPN membership
 [Timer]
 OnBootSec=10s
 OnUnitInactiveSec=15s
+AccuracySec=1s
 Unit=internal-vpn-update.service
 
 [Install]

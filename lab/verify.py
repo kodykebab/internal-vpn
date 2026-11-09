@@ -22,8 +22,11 @@ BASE = Path("/home/vagrant/internal-vpn-lab")
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 from internal_vpn.host import accept_revision, validate_snapshot
+from lab.queue_cleanup import clear_fixture_jobs
 
 results = {}
+timings = {}
+network_results = {}
 processes = []
 namespaces = []
 users = []
@@ -46,6 +49,11 @@ def check(name, passed):
     print(json.dumps({name: bool(passed)}), flush=True)
     if not passed:
         raise AssertionError(name)
+
+
+def timing(name, value):
+    timings[name] = value
+    print(json.dumps({"timing": name, "seconds": value}), flush=True)
 
 
 def request(path, token=None, data=None, method=None, extra_headers=None):
@@ -133,6 +141,7 @@ try:
     frappe.connect()
     if frappe.conf.db_name != "ivpn_poc":
         raise RuntimeError("Refusing to test another database")
+    clear_fixture_jobs()
     manager, manager_token = create_user("manager", ["VPN Manager", "System Manager"])
     engineer, engineer_token = create_user("engineer", ["VPN Engineer"])
     other_engineer, other_engineer_token = create_user("other-engineer", ["VPN Engineer"])
@@ -144,9 +153,10 @@ try:
     with lab_directory() as temporary:
         directory = Path(temporary)
         run("sudo", "install", "-d", "-m", "0700", str(host_root), str(host_root / "internal_vpn"))
-        for file in ("host.py", "validation.py", "__init__.py"):
+        for file in ("host.py", "validation.py", "metrics.py", "__init__.py"):
             run("sudo", "install", "-m", "0644", str(SOURCE / "internal_vpn" / file), str(host_root / "internal_vpn" / file))
         run("sudo", "install", "-m", "0644", str(SOURCE / "run-host.py"), str(host_root / "run-host.py"))
+        run("sudo", "install", "-m", "0644", str(SOURCE / "run-metrics.py"), str(host_root / "run-metrics.py"))
         environment = dict(os.environ, PYTHONPATH=str(SOURCE), SITES_PATH=str(BASE / "sites"), VPN_SITE="test.local")
         log = (BASE / "logs/poc-http.log").open("w")
         server = subprocess.Popen([sys.executable, "-m", "gunicorn", "--workers", "2", "--bind", "127.0.0.1:18441",
@@ -238,6 +248,15 @@ try:
                 raise RuntimeError(f"Host {index} updater failed")
             return result.returncode == 0
 
+        def metrics(index, *targets, expect=True):
+            command = ["sudo", "python3", str(host_root / "run-metrics.py"), "--config", str(host_root / f"host{index}.json")]
+            for target in targets:
+                command += ["--probe", target]
+            result = run(*command, check=False)
+            if expect and result.returncode != 0:
+                raise RuntimeError("Live measurement collection failed")
+            return json.loads(result.stdout)
+
         def configure_client(index=2, reconnect=False):
             # Engineer owns the private key and applies public configuration locally.
             data = api("configuration", engineer_token, {"name": peer_names[2]}, get=True)
@@ -282,6 +301,9 @@ try:
         configure_client()
         spoke_before_membership = api("configuration", hosts[1][1], {"name": peer_names[1]}, get=True)
         update(4)
+        if "--systemd" in sys.argv:
+            from lab.systemd_lifecycle import verify as verify_systemd
+            verify_systemd(SOURCE, directory, host_root, configs[4], namespace_names[4], run_id, run, check, timing)
         check("hub_service_connectivity", ping(0, addresses[1]) and ping(1, addresses[0]))
         check("service_spokes_communicate_through_hub", ping(1, addresses[4]) and ping(4, addresses[1]))
         check("spokes_have_only_the_hub_peer", all(net(i, "wg", "show", "ivpn0", "peers").stdout.strip() == public_keys[0] for i in (1, 2, 4)))
@@ -292,6 +314,27 @@ try:
         net(0, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.send_redirects=0")
         check("engineer_reaches_both_services", ping(2, addresses[0]) and ping(2, addresses[1]))
         check("applied_revision_reported", api("status", manager_token, get=True)["all_current"])
+        from lab.convergence import verify as verify_convergence
+        verify_convergence(SOURCE, host_root, peer_names[2], engineer_token, manager_token,
+                           public_keys[2], addresses[0], api, run, net, update, configure_client, ping, check, timing)
+        before_metrics = metrics(0, addresses[1])
+        check("metrics_live_probe_and_handshake", before_metrics["probes"][0]["reachable"] and
+              before_metrics["probes"][0]["rtt_ms"] is not None and any(
+                  peer["public_key"] == public_keys[2] and peer["handshake_age_seconds"] is not None for peer in before_metrics["peers"]))
+        check("metrics_reads_no_credentials", all(config["token"] not in json.dumps(before_metrics) for config in configs))
+        baseline_rx = next(peer["rx_bytes"] for peer in before_metrics["peers"] if peer["public_key"] == public_keys[2])
+        ping(2, addresses[0])
+        after_metrics = metrics(0)
+        check("metrics_transfer_counters_increase_with_traffic", next(peer["rx_bytes"] for peer in after_metrics["peers"]
+              if peer["public_key"] == public_keys[2]) > baseline_rx)
+        check("metrics_rejects_non_vpn_probe", metrics(0, "192.0.2.1", expect=False)["ok"] is False)
+        check("metrics_does_not_change_membership", before_metrics["peers"] and
+              {peer["public_key"] for peer in after_metrics["peers"]} == set(net(0, "wg", "show", "ivpn0", "peers").stdout.split()) and
+              api("status", manager_token, get=True)["all_current"])
+        if "--network" in sys.argv:
+            from lab.network_conditions import verify as verify_network
+            verify_network(SOURCE, namespace_names, configs, hosts, other_engineer_token, manager_token,
+                           api, run, net, update, ping, check, network_results)
         denied = net(0, "runuser", "-u", "vagrant", "--", "wg", "set", "ivpn0", "listen-port", "56441", check=False)
         check("app_user_cannot_modify_wireguard", denied.returncode != 0 and "Operation not permitted" in denied.stderr)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -373,6 +416,9 @@ try:
         update(0)
         check("hub_only_revocation_blocks_all_services", not ping(2, addresses[0]) and not ping(2, addresses[1]) and
               not ping(2, addresses[4]) and api("status", manager_token, get=True)["hub_current"])
+        revoked_metrics = metrics(0, addresses[2])
+        check("metrics_revoked_device_has_no_peer_and_no_reply", revoked_metrics["ok"] and not revoked_metrics["probes"][0]["reachable"] and
+              revoked_metrics["probes"][0]["rtt_ms"] is None and all(peer["public_key"] != public_keys[2] for peer in revoked_metrics["peers"]))
         check("unchanged_spokes_remain_current_without_refresh", api("status", manager_token, get=True)["all_current"])
         update(1)
         check("complete_revocation_blocks_both", not ping(2, addresses[0]) and not ping(2, addresses[1]) and
@@ -424,6 +470,7 @@ try:
               urlencode({"name": peer_names[2]}), engineer_token)[0] in (401, 403))
 
         run("sudo", "ip", "-n", namespace_names[0], "link", "del", "ivpn0")
+        check("metrics_missing_interface_reports_collection_failure", metrics(0, expect=False)["ok"] is False)
         check("missing_interface_reports_apply_failure", not update(0, expect=False) and
               not api("status", manager_token, get=True)["all_current"])
         interface = f"iv{run_id}0"
@@ -453,6 +500,9 @@ try:
         api("register", other_engineer_token, {"kind": "Device", "public_key": public})
         update(0)
         check("retired_spoke_does_not_block_later_revisions", api("status", manager_token, get=True)["all_current"])
+        from lab.key_lifecycle import verify as verify_key_lifecycle
+        verify_key_lifecycle(directory, host_root, configs, hosts, public_keys, manager_token,
+                             api, request, run, net, update, ping, check)
 
 finally:
     for name in namespaces:
@@ -476,14 +526,18 @@ finally:
     frappe.init("test.local")
     frappe.connect()
     if frappe.conf.db_name == "ivpn_poc":
+        clear_fixture_jobs()
         frappe.db.set_value("VPN Network", "default", "hub", None)
         for user in users:
             frappe.db.delete("VPN Peer", {"user": user})
             frappe.delete_doc("User", user, ignore_permissions=True, force=True)
         frappe.db.commit()
+        results["lab_background_queue_empty"] = clear_fixture_jobs()
     frappe.destroy()
     remaining = run("sudo", "ip", "netns", "list").stdout
     results["temporary_namespaces_removed"] = all(name not in remaining for name in namespaces)
+    (SOURCE / "lab-network.json").write_text(json.dumps(network_results, indent=2) + "\n")
+    (SOURCE / "lab-timings.json").write_text(json.dumps(timings, indent=2) + "\n")
     (SOURCE / "lab-results.json").write_text(json.dumps(results, indent=2) + "\n")
     if central:
         (SOURCE / "central-results.json").write_text(json.dumps({"source_sha256": getattr(central, "fixture", {}).get("source_sha256"),
