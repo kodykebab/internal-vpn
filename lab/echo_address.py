@@ -1,8 +1,8 @@
 """Non-root HTTP fixture for verifying routed source addresses."""
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 class Handler(BaseHTTPRequestHandler):

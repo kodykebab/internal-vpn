@@ -6,11 +6,11 @@ import hashlib
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import ssl
 import subprocess
 import tempfile
+from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
@@ -25,7 +25,12 @@ class NoRedirect(HTTPRedirectHandler):
 def validate_snapshot(data, local):
     if set(data) != {"version", "topology", "name", "revision", "subnet", "address", "public_key", "peers"}:
         raise ValueError("Unexpected configuration fields")
-    if type(data["version"]) is not int or data["version"] != 2 or type(data["revision"]) is not int or data["revision"] < 1:
+    if (
+        type(data["version"]) is not int
+        or data["version"] != 2
+        or type(data["revision"]) is not int
+        or data["revision"] < 1
+    ):
         raise ValueError("Invalid configuration version")
     for field in ("topology", "name", "subnet", "address", "public_key"):
         if data[field] != local[field]:
@@ -62,17 +67,22 @@ def validate_snapshot(data, local):
             if key != local.get("hub_public_key") or peer["allowed_ips"] != str(network):
                 raise ValueError("Only the pinned hub may route the allocated subnet")
             validation.endpoint(peer["endpoint"])
+
+
+def snapshot_digest(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def accept_revision(path, revision, digest):
     if path.exists():
         previous = json.loads(path.read_text())
-        if revision < previous["revision"] or (revision == previous["revision"] and digest != previous["digest"]):
+        if revision < previous["revision"] or (
+            revision == previous["revision"] and digest != previous["digest"]
+        ):
             raise ValueError("Stale or conflicting configuration")
         if revision == previous["revision"]:
             return
-    # Persist the highest accepted revision BEFORE any changes, including partial failures.
+    # Persist before mutation so a partial apply cannot accept an older snapshot.
     fd, temporary = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(fd, "w") as file:
@@ -108,18 +118,33 @@ def apply(data, local):
     for key in sorted(existing - wanted):
         wg(local, "set", interface, "peer", key, "remove")
     for peer in data["peers"]:
-        arguments = ["set", interface, "peer", peer["public_key"], "allowed-ips", peer["allowed_ips"],
-                     "persistent-keepalive", "25" if peer["endpoint"] else "0"]
+        arguments = [
+            "set",
+            interface,
+            "peer",
+            peer["public_key"],
+            "allowed-ips",
+            peer["allowed_ips"],
+            "persistent-keepalive",
+            "25" if peer["endpoint"] else "0",
+        ]
         if peer["endpoint"]:
             arguments += ["endpoint", peer["endpoint"]]
         wg(local, *arguments)
 
 
-class Controller:
+class ControlPlaneClient:
     def __init__(self, local):
         self.local = local
         url = urlsplit(local["url"])
-        if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+        ):
             raise ValueError("Control plane requires HTTPS")
         context = ssl.create_default_context(cafile=local.get("ca_file"))
         self.opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=context))
@@ -129,8 +154,11 @@ class Controller:
         body = json.dumps(data).encode() if post else None
         if not post:
             url += "?" + urlencode(data)
-        request = Request(url, data=body, headers={"Authorization": "token " + self.local["token"],
-                                                  "Content-Type": "application/json"})
+        request = Request(
+            url,
+            data=body,
+            headers={"Authorization": "token " + self.local["token"], "Content-Type": "application/json"},
+        )
         with self.opener.open(request, timeout=15) as response:
             raw = response.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
@@ -142,16 +170,21 @@ def reconcile(local, state):
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (state / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        controller = Controller(local)
+        controller = ControlPlaneClient(local)
         data = controller.request("configuration", {"name": local["name"]})
-        digest = validate_snapshot(data, local)
+        validate_snapshot(data, local)
+        digest = snapshot_digest(data)
         accept_revision(state / "revision.json", data["revision"], digest)
         try:
             apply(data, local)
         except Exception:
-            controller.request("report", {"name": local["name"], "revision": data["revision"], "success": False}, True)
+            controller.request(
+                "report", {"name": local["name"], "revision": data["revision"], "success": False}, True
+            )
             raise
-        controller.request("report", {"name": local["name"], "revision": data["revision"], "success": True}, True)
+        controller.request(
+            "report", {"name": local["name"], "revision": data["revision"], "success": True}, True
+        )
         return {"revision": data["revision"], "applied": True}
 
 

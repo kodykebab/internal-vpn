@@ -4,8 +4,8 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import secrets
+from pathlib import Path
 
 import frappe
 
@@ -28,9 +28,16 @@ try:
         fixture = {}
         for label, roles in (("operator", ["System Manager"]), ("customer", ["Central User"])):
             email = f"ivpn-central-{args.run_id}-{label}@example.invalid"
-            user = frappe.get_doc({"doctype": "User", "email": email, "first_name": label,
-                                   "send_welcome_email": 0, "user_type": "System User",
-                                   "roles": [{"role": role} for role in roles]})
+            user = frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": email,
+                    "first_name": label,
+                    "send_welcome_email": 0,
+                    "user_type": "System User",
+                    "roles": [{"role": role} for role in roles],
+                }
+            )
             user.insert(ignore_permissions=True)
             key, secret = secrets.token_hex(10), secrets.token_hex(24)
             user.api_key, user.api_secret = key, secret

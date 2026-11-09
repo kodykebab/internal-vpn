@@ -1,14 +1,22 @@
 import base64
-from copy import deepcopy
-import json
 import io
-from pathlib import Path
+import json
 import tempfile
 import unittest
-from unittest.mock import patch
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from internal_vpn.host import Controller, NoRedirect, accept_revision, apply, main, reconcile, validate_snapshot
+from internal_vpn.host import (
+    ControlPlaneClient,
+    NoRedirect,
+    accept_revision,
+    apply,
+    main,
+    reconcile,
+    validate_snapshot,
+)
 
 
 def key(byte):
@@ -17,14 +25,29 @@ def key(byte):
 
 class HostTests(unittest.TestCase):
     def setUp(self):
-        self.local = dict(name="service-1", subnet="100.100.64.0/24", address="100.100.64.1",
-                          public_key=key(1), interface="ivpn0", topology="hub")
-        self.data = dict(version=2, revision=3, **{k: v for k, v in self.local.items() if k != "interface"},
-                         peers=[dict(public_key=key(2), address="100.100.64.2", endpoint=None, allowed_ips="100.100.64.2/32")])
+        self.local = {
+            "name": "service-1",
+            "subnet": "100.100.64.0/24",
+            "address": "100.100.64.1",
+            "public_key": key(1),
+            "interface": "ivpn0",
+            "topology": "hub",
+        }
+        self.data = dict(
+            version=2,
+            revision=3,
+            **{k: v for k, v in self.local.items() if k != "interface"},
+            peers=[
+                {
+                    "public_key": key(2),
+                    "address": "100.100.64.2",
+                    "endpoint": None,
+                    "allowed_ips": "100.100.64.2/32",
+                }
+            ],
+        )
 
     def test_valid_snapshot_and_learned_device_endpoint(self):
-        self.assertEqual(len(validate_snapshot(self.data, self.local)), 64)
-        self.data["peers"][0]["endpoint"] = None
         validate_snapshot(self.data, self.local)
 
     def test_rejects_untrusted_shapes_and_addresses(self):
@@ -71,27 +94,34 @@ class HostTests(unittest.TestCase):
         self.assertNotIn("private-key", str(calls))
 
     def test_wrong_interface_identity_prevents_mutation(self):
-        with patch("internal_vpn.host.wg", return_value=key(7)) as wg:
-            with self.assertRaises(ValueError):
-                apply(self.data, self.local)
+        with patch("internal_vpn.host.wg", return_value=key(7)) as wg, self.assertRaises(ValueError):
+            apply(self.data, self.local)
         self.assertEqual(wg.call_count, 1)
 
     def test_failed_apply_keeps_watermark_and_reports_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
-            with patch("internal_vpn.host.Controller") as controller, patch("internal_vpn.host.apply", side_effect=OSError):
+            with (
+                patch("internal_vpn.host.ControlPlaneClient") as controller,
+                patch("internal_vpn.host.apply", side_effect=OSError),
+            ):
                 controller.return_value.request.return_value = self.data
                 with self.assertRaises(OSError):
                     reconcile(self.local, state)
                 self.assertEqual(json.loads((state / "revision.json").read_text())["revision"], 3)
-                self.assertEqual(controller.return_value.request.call_args.args,
-                                 ("report", {"name": "service-1", "revision": 3, "success": False}, True))
+                self.assertEqual(
+                    controller.return_value.request.call_args.args,
+                    ("report", {"name": "service-1", "revision": 3, "success": False}, True),
+                )
 
     def test_stale_response_after_restart_never_reaches_wireguard(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
             accept_revision(state / "revision.json", 4, "newer")
-            with patch("internal_vpn.host.Controller") as controller, patch("internal_vpn.host.apply") as apply_mock:
+            with (
+                patch("internal_vpn.host.ControlPlaneClient") as controller,
+                patch("internal_vpn.host.apply") as apply_mock,
+            ):
                 controller.return_value.request.return_value = self.data
                 with self.assertRaises(ValueError):
                     reconcile(self.local, state)
@@ -100,7 +130,10 @@ class HostTests(unittest.TestCase):
 
     def test_unavailable_control_plane_does_not_apply_cached_membership(self):
         with tempfile.TemporaryDirectory() as temporary:
-            with patch("internal_vpn.host.Controller") as controller, patch("internal_vpn.host.apply") as apply_mock:
+            with (
+                patch("internal_vpn.host.ControlPlaneClient") as controller,
+                patch("internal_vpn.host.apply") as apply_mock,
+            ):
                 controller.return_value.request.side_effect = OSError
                 with self.assertRaises(OSError):
                     reconcile(self.local, Path(temporary))
@@ -108,7 +141,10 @@ class HostTests(unittest.TestCase):
 
     def test_report_failure_does_not_undo_applied_membership(self):
         with tempfile.TemporaryDirectory() as temporary:
-            with patch("internal_vpn.host.Controller") as controller, patch("internal_vpn.host.apply") as apply_mock:
+            with (
+                patch("internal_vpn.host.ControlPlaneClient") as controller,
+                patch("internal_vpn.host.apply") as apply_mock,
+            ):
                 controller.return_value.request.side_effect = [self.data, OSError("report unreachable")]
                 with self.assertRaises(OSError):
                     reconcile(self.local, Path(temporary))
@@ -120,11 +156,16 @@ class HostTests(unittest.TestCase):
             config = Path(temporary) / "host.json"
             config.write_text("{}")
             output = io.StringIO()
-            with patch("sys.argv", ["run-host.py", "--config", str(config), "--state", temporary]), \
-                 patch("internal_vpn.host.os.geteuid", return_value=0), \
-                 patch("internal_vpn.host.Path.stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100600)), \
-                 patch("internal_vpn.host.reconcile", side_effect=OSError("secret-must-not-appear")), \
-                 patch("sys.stdout", output), self.assertRaises(SystemExit) as error:
+            with (
+                patch("sys.argv", ["run-host.py", "--config", str(config), "--state", temporary]),
+                patch("internal_vpn.host.os.geteuid", return_value=0),
+                patch(
+                    "internal_vpn.host.Path.stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100600)
+                ),
+                patch("internal_vpn.host.reconcile", side_effect=OSError("secret-must-not-appear")),
+                patch("sys.stdout", output),
+                self.assertRaises(SystemExit) as error,
+            ):
                 main()
             self.assertEqual(error.exception.code, 1)
             result = json.loads(output.getvalue())
@@ -133,9 +174,13 @@ class HostTests(unittest.TestCase):
             self.assertNotIn("secret-must-not-appear", output.getvalue())
 
     def test_https_and_no_credential_redirects(self):
-        for url in ("http://example.com", "https://user:password@example.com", "https://example.com?token=value"):
+        for url in (
+            "http://example.com",
+            "https://user:password@example.com",
+            "https://example.com?token=value",
+        ):
             with self.subTest(url=url), self.assertRaises(ValueError):
-                Controller({"url": url})
+                ControlPlaneClient({"url": url})
         with self.assertRaises(ValueError):
             NoRedirect().redirect_request(None, None, 302, "redirect", {}, "https://other.example")
 

@@ -1,8 +1,8 @@
 """Update only the empty disposable VPN test site for the hub schema."""
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir("/home/vagrant/internal-vpn-lab/sites")

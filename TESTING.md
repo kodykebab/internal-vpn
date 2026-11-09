@@ -70,7 +70,7 @@ Checks require the accepted revision to be persisted before either interruption.
 
 `lab-timings.json` records three direct API-to-acknowledgement samples each for disabling and re-enabling an existing engineer device, the next-run duration after both interruptions, and one timer-driven peer-drift repair sample. Direct samples include the membership HTTP request and an immediately invoked hub updater through its success report; they exclude the subsequent reachability probe. Timer repair ends when the kernel peer reappears, not when a report is accepted. All measurements use the one-host loopback lab and are observations, not a fleet percentile or revocation SLA. The generated timing artifact contains no credentials and is ignored by Git.
 
-Observed on `ubuntu-dev` in the latest run:
+Recorded on `ubuntu-dev` before the naming/structure cleanup (commit `3fa8431`):
 
 | Measurement | Samples | Seconds |
 | --- | --- | --- |
@@ -94,7 +94,7 @@ A non-root TCP fixture transfers exactly 2 MiB from one service spoke to another
 
 The test applies `tc netem` only to the disposable WireGuard interfaces and restores qdiscs/MTUs before continuing. Its impairment is on overlay data packets, not the host UDP underlay or handshake path. `lab-network.json` records timings, sample goodput and configuration sizes; it is ignored by Git. A single shaped flow on one host does not measure maximum hub capacity, CPU saturation, fleet load, NAT behavior or actual WAN performance. No existing host interface, route or global traffic policy is changed.
 
-Observed in the bounded network run:
+Recorded in the bounded network run before that cleanup:
 
 | Measurement | Result |
 | --- | --- |

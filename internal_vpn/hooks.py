@@ -6,4 +6,6 @@ app_email = "developers@frappe.io"
 app_license = "mit"
 after_install = "internal_vpn.install.after_install"
 auth_hooks = ["internal_vpn.auth.require_login"]
-doc_events = {"User": {"on_update": "internal_vpn.api.user_changed", "on_trash": "internal_vpn.api.user_changed"}}
+doc_events = {
+    "User": {"on_update": "internal_vpn.api.user_changed", "on_trash": "internal_vpn.api.user_changed"}
+}
