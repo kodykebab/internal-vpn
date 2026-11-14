@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/internal-vpn/run-host.py --config /etc/internal-vpn/host.json --state /var/lib/internal-vpn
+ExecStart=/usr/bin/python3 /opt/internal-vpn/host.py update --config /etc/internal-vpn/host.json --state /var/lib/internal-vpn
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -1,6 +1,4 @@
-# Provisioning template: replace ivpn0/subnet for the selected host allocation.
-# Integrate with the host's existing firewall; an accept here cannot override
-# a drop in another base chain. This does not implement application INPUT rules.
+# Template: set the interface and subnet for the host, and merge into the existing firewall.
 table inet internal_vpn {
     chain forward {
         type filter hook forward priority 0; policy accept;

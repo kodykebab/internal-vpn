@@ -82,6 +82,14 @@
     {
       "role": "VPN Manager",
       "read": 1
+    },
+    {
+      "role": "VPN Engineer",
+      "read": 1
+    },
+    {
+      "role": "VPN Host",
+      "read": 1
     }
   ]
 }
