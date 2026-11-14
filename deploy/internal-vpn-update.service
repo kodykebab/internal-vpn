@@ -14,6 +14,16 @@ StateDirectory=internal-vpn
 StateDirectoryMode=0700
 PrivateTmp=true
 CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
 TimeoutStartSec=120
 
 [Install]
