@@ -193,6 +193,8 @@ class VPNNetwork(Document):
             status["hosts"].append(
                 {
                     "name": peer.name,
+                    "address": peer.address,
+                    "user": peer.user,
                     "enabled": peer.enabled,
                     "reported_revision": peer.reported_revision,
                     "apply_success": peer.apply_success,

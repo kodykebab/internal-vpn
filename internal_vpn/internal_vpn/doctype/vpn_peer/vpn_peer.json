@@ -59,23 +59,27 @@
     {
       "fieldname": "reported_revision",
       "label": "Reported Revision",
-      "fieldtype": "Int"
+      "fieldtype": "Int",
+      "depends_on": "eval:doc.kind=='Service'"
     },
     {
       "fieldname": "apply_success",
       "label": "Apply Success",
-      "fieldtype": "Check"
+      "fieldtype": "Check",
+      "depends_on": "eval:doc.kind=='Service'"
     },
     {
       "fieldname": "reported_at",
       "label": "Reported At",
-      "fieldtype": "Datetime"
+      "fieldtype": "Datetime",
+      "depends_on": "eval:doc.kind=='Service'"
     },
     {
       "fieldname": "reported_digest",
       "label": "Reported Configuration Digest",
       "fieldtype": "Data",
-      "read_only": 1
+      "read_only": 1,
+      "depends_on": "eval:doc.kind=='Service'"
     }
   ],
   "permissions": [
@@ -91,5 +95,8 @@
       "role": "VPN Host",
       "read": 1
     }
-  ]
+  ],
+  "title_field": "address",
+  "show_title_field_in_link": 1,
+  "search_fields": "address,user"
 }
