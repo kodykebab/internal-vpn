@@ -2,8 +2,4 @@ __pycache__/
 *.pyc
 .venv/
 .ruff_cache/
-lab-results.json
-central-results.json
 *.egg-info/
-lab-timings.json
-lab-network.json
