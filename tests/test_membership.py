@@ -126,6 +126,18 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(frappe.db.get_value("VPN Peer", self.hub["name"], "endpoint"), "192.0.2.1:51820")
         self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
 
+    def test_only_the_hub_endpoint_can_change(self):
+        service = self.network("register_service", user=SPOKE, public_key=key(2), endpoint="192.0.2.2:51820")
+        device = self.device()
+        revision = frappe.db.get_value("VPN Network", "default", "revision")
+        for name in (service["name"], device["name"]):
+            with self.subTest(name=name), self.assertRaises(frappe.ValidationError):
+                self.peer(name, "set_endpoint", endpoint="192.0.2.3:51820")
+        self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
+        self.assertEqual(
+            self.peer(self.hub["name"], "set_endpoint", endpoint="192.0.2.9:51820")["revision"], revision + 1
+        )
+
     def test_manager_can_enroll_for_an_approved_engineer(self):
         device = self.network("register_device", user=ENGINEER, public_key=key(3))
         snapshot = self.peer(device["name"], "get_configuration", actor=ENGINEER)

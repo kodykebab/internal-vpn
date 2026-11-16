@@ -117,8 +117,8 @@ class VPNPeer(Document):
     @frappe.whitelist(methods=["POST"])
     def set_endpoint(self, endpoint):
         network = self.lock_for_editor()
-        if self.kind != "Service":
-            frappe.throw("Device endpoints are learned by WireGuard")
+        if self.kind != "Service" or (network.hub and self.name != network.hub):
+            frappe.throw("Only the hub endpoint is used; others are learned by WireGuard")
         if self.name == network.hub and not endpoint:
             frappe.throw("The hub requires a UDP endpoint")
         try:

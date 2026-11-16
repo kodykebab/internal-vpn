@@ -34,7 +34,10 @@ class VPNPeerForm {
 		if (!frm.doc.enabled) frm.add_custom_button(__("Release"), () => this.release(), __("Peer"));
 		frm.add_custom_button(__("Rotate Key"), () => this.rotate_key(), __("Peer"));
 		if (manager && frm.doc.kind === "Service")
-			frm.add_custom_button(__("Set Endpoint"), () => this.set_endpoint(), __("Peer"));
+			frappe.db.get_value("VPN Network", "default", "hub").then(({ message }) => {
+				if (!message.hub || message.hub === frm.doc.name)
+					frm.add_custom_button(__("Set Endpoint"), () => this.set_endpoint(), __("Peer"));
+			});
 	}
 
 	call(method, args = {}, callback = () => this.frm.reload_doc(), type = "POST") {

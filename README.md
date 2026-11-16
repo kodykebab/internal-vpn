@@ -35,7 +35,7 @@ All methods are whitelisted on the DocTypes. In Desk, select **Internal VPN** to
 
 | Role | Methods |
 | --- | --- |
-| VPN Manager | `VPN Network`: `initialize`, `register_service`, `register_device` for an approved engineer, `set_hub`, `get_status`. `VPN Peer`: `set_enabled`, `rotate_key`, `set_endpoint`, `release` on any peer |
+| VPN Manager | `VPN Network`: `initialize`, `register_service`, `register_device` for an approved engineer, `set_hub`, `get_status`. `VPN Peer`: `set_enabled`, `rotate_key`, `release` on any peer; `set_endpoint` on the hub |
 | VPN Engineer | `VPN Network`: `register_device`. `VPN Peer`: `get_configuration`, `set_enabled`, `rotate_key`, `release` on their own devices |
 | VPN Host | `VPN Peer`: `get_configuration` and `report` on its own service. Use one user per host. |
 
