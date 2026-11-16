@@ -41,6 +41,7 @@ class VPNNetwork(Document):
 
     def advance_revision(self) -> int:
         self.revision += 1
+        self.hub_digest = None
         self.save_document(self)
         if self.hub:
             frappe.db.after_commit.add(self.request_hub_update)
@@ -117,7 +118,21 @@ class VPNNetwork(Document):
         )
 
     def get_configuration(self, peer) -> dict:
-        return self.build_configuration(peer, *self.get_membership(peer))
+        snapshot = self.build_configuration(peer, *self.get_membership(peer))
+        if peer.name == self.hub:
+            self.issue_hub_digest(snapshot)
+        return snapshot
+
+    def issue_hub_digest(self, snapshot: dict):
+        """One hub digest per revision, so owner changes that skip User hooks still advance it."""
+        digest = WireGuard.digest(snapshot)
+        if self.hub_digest == digest:
+            return
+        if self.hub_digest:
+            snapshot["revision"] = self.advance_revision()
+        self.db_set("hub_digest", digest, update_modified=False)
+        # Configuration is fetched with GET, which Frappe rolls back.
+        frappe.db.commit()
 
     def build_configuration(self, peer, hub, members) -> dict:
         """Protocol v2 snapshot. The hub lists every member as a /32; a spoke lists only the hub."""

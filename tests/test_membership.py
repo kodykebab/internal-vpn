@@ -527,6 +527,21 @@ class MembershipTests(unittest.TestCase):
         self.assertNotIn(device["address"], [peer["address"] for peer in snapshot["peers"]])
         self.assertFalse(self.network("get_status")["hub_current"])
 
+    def test_owner_change_without_hooks_advances_hub_revision(self):
+        device = self.device()
+        first = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        self.assertEqual(self.peer(self.hub["name"], "get_configuration", actor=HUB), first)
+        frappe.db.set_value("User", ENGINEER, "enabled", 0)
+        frappe.db.commit()
+        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        self.assertEqual(snapshot["revision"], first["revision"] + 1)
+        self.assertNotIn(device["address"], [peer["address"] for peer in snapshot["peers"]])
+        self.assertEqual(self.peer(self.hub["name"], "get_configuration", actor=HUB), snapshot)
+        with tempfile.TemporaryDirectory() as directory:
+            watermark = Path(directory) / "revision.json"
+            Host.accept_revision(watermark, first["revision"], WireGuard.digest(first))
+            Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
+
     def test_hub_owner_must_keep_role_and_enablement(self):
         for change in ("enabled", "roles"):
             frappe.set_user("Administrator")
