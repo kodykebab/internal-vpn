@@ -1,5 +1,13 @@
 # Template: set the interface and subnet for the host, and merge into the existing firewall.
 table inet internal_vpn {
+    # The hub only routes. VPN members may ping it but reach no hub service.
+    chain input {
+        type filter hook input priority 0; policy accept;
+        iifname "ivpn0" ct state established,related accept
+        iifname "ivpn0" icmp type echo-request accept
+        iifname "ivpn0" counter drop
+    }
+
     chain forward {
         type filter hook forward priority 0; policy accept;
         iifname "ivpn0" oifname "ivpn0" ip saddr 100.100.64.0/24 ip daddr 100.100.64.0/24 accept

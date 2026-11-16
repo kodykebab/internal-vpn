@@ -7,7 +7,7 @@ The host's existing provisioning owns the interface, private key, address, route
 - Python 3.10 or later and `wg` for root.
 - A dedicated `ivpn0` interface with a locally generated key and the address from `register_service`.
 - Run the agent in the host network namespace.
-- On the hub: IPv4 forwarding, redirects off and [hub-forward.nft](hub-forward.nft) merged into the firewall. Do not NAT VPN traffic.
+- On the hub: IPv4 forwarding, redirects off and [hub.nft](hub.nft) merged into the firewall. It blocks hub services from VPN members. Do not NAT VPN traffic.
 - HTTPS access to the VPN app that does not depend on the tunnel.
 
 For a dedicated 4-vCPU/8-GiB hub bench limited to four Gunicorn workers, raise the count to six with `bench config set-common-config -c gunicorn_workers 6`. Keep Nginx in front and regenerate and apply the existing Supervisor or systemd configuration. Check CPU and memory under concurrent polling and hub updates; more workers do not increase CPU capacity.
