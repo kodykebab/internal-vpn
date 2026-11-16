@@ -1,106 +1,144 @@
 frappe.ui.form.on("VPN Network", {
 	refresh(frm) {
-		frm.disable_save();
-		const manager = frappe.user.has_role("VPN Manager");
-		const run = async (method, args, message, after = () => frm.reload_doc()) => {
-			const result = await call_vpn_method(frm, method, args);
-			if (!result) return;
-			frappe.show_alert({ message, indicator: "green" }, 5);
-			after(result);
-		};
-		const open_peer = (result) => frappe.set_route("Form", "VPN Peer", result.name);
-
-		if (!frm.doc.subnet) frm.set_intro(__("Initialize the subnet before registering peers."), "orange");
-		else if (!frm.doc.hub) frm.set_intro(__("Set the hub before hosts and devices can connect."), "orange");
-
-		if (frappe.user.has_role("VPN Engineer")) {
-			frm.add_custom_button(__("Register Device"), () =>
-				frappe.prompt(
-					{ fieldname: "public_key", label: __("WireGuard Public Key"), fieldtype: "Data", reqd: 1 },
-					(values) => run("register_device", values, __("Device registered"), open_peer),
-					__("Register Device"),
-				),
-			);
-		}
-		if (!manager) return;
-
-		if (!frm.doc.subnet) {
-			frm.add_custom_button(
-				__("Initialize"),
-				() =>
-					frappe.prompt(
-						{ fieldname: "subnet", label: __("Subnet"), fieldtype: "Data", reqd: 1, description: __("Inside 100.64.0.0/10") },
-						(values) => run("initialize", values, __("Subnet set")),
-						__("Initialize"),
-					),
-				__("Network"),
-			);
-		}
-		frm.add_custom_button(
-			__("Register Service"),
-			() =>
-				frappe.prompt(
-					[
-						{ fieldname: "user", label: __("Host User"), fieldtype: "Link", options: "User", reqd: 1 },
-						{ fieldname: "public_key", label: __("WireGuard Public Key"), fieldtype: "Data", reqd: 1 },
-						{ fieldname: "endpoint", label: __("UDP Endpoint"), fieldtype: "Data", description: __("Required for the hub") },
-					],
-					(values) => run("register_service", values, __("Service registered"), open_peer),
-					__("Register Service"),
-				),
-			__("Network"),
-		);
-		if (!frm.doc.hub) {
-			frm.add_custom_button(
-				__("Set Hub"),
-				() =>
-					frappe.prompt(
-						{ fieldname: "peer", label: __("Service Peer"), fieldtype: "Link", options: "VPN Peer", reqd: 1 },
-						(values) => run("set_hub", values, __("Hub set")),
-						__("Set Hub"),
-					),
-				__("Network"),
-			);
-		}
-		frm.add_custom_button(__("Status"), async () => {
-			const status = await call_vpn_method(frm, "get_status", {}, "GET");
-			if (status) show_status(status);
-		});
+		new VPNNetworkForm(frm).refresh();
 	},
 });
 
-// Frappe has already shown the server's error, so a refused call returns null and the caller stops.
-async function call_vpn_method(frm, method, args = {}, type = "POST") {
-	try {
-		return (await frm.call({ doc: frm.doc, method, args, type, freeze: true })).message ?? {};
-	} catch {
-		return null;
+class VPNNetworkForm {
+	constructor(frm) {
+		this.frm = frm;
 	}
-}
 
-function show_status(status) {
-	const pill = (ok, yes, no) => `<span class="indicator-pill ${ok ? "green" : "orange"}">${ok ? yes : no}</span>`;
-	const rows = status.hosts.map(
-		(host) => `<tr>
+	refresh() {
+		const frm = this.frm;
+		frm.disable_save();
+		if (frm.is_new()) return;
+		frm.set_intro("");
+		if (!frm.doc.subnet) frm.set_intro(__("Initialize the subnet before registering peers."), "orange");
+		else if (!frm.doc.hub) frm.set_intro(__("Set the hub before hosts and devices can connect."), "orange");
+
+		if (frappe.user.has_role("VPN Engineer") || frappe.user.has_role("VPN Manager")) {
+			frm.add_custom_button(__("Register Device"), () => this.register_device());
+		}
+		if (!frappe.user.has_role("VPN Manager")) return;
+		if (!frm.doc.subnet) frm.add_custom_button(__("Initialize"), () => this.initialize(), __("Network"));
+		frm.add_custom_button(__("Register Service"), () => this.register_service(), __("Network"));
+		if (!frm.doc.hub) frm.add_custom_button(__("Set Hub"), () => this.set_hub(), __("Network"));
+		frm.add_custom_button(__("Status"), () =>
+			this.call("get_status", {}, (status) => this.show_status(status), "GET")
+		);
+	}
+
+	call(method, args = {}, callback = () => this.frm.reload_doc(), type = "POST") {
+		frappe.call({
+			method: "frappe.handler.run_doc_method",
+			args: { dt: this.frm.doctype, dn: this.frm.doc.name, method, args },
+			type,
+			freeze: true,
+			callback: (response) => callback(response.message),
+		});
+	}
+
+	initialize() {
+		frappe.prompt(
+			{
+				fieldname: "subnet",
+				label: __("Subnet"),
+				fieldtype: "Data",
+				reqd: 1,
+				description: __("Inside 100.64.0.0/10"),
+			},
+			(values) => this.call("initialize", values),
+			__("Initialize")
+		);
+	}
+
+	register_device() {
+		const fields = [
+			{ fieldname: "public_key", label: __("WireGuard Public Key"), fieldtype: "Data", reqd: 1 },
+		];
+		if (frappe.user.has_role("VPN Manager")) {
+			fields.unshift({
+				fieldname: "user",
+				label: __("Engineer"),
+				fieldtype: "Link",
+				options: "User",
+				reqd: 1,
+			});
+		}
+		frappe.prompt(
+			fields,
+			(values) =>
+				this.call("register_device", values, (peer) => frappe.set_route("Form", "VPN Peer", peer.name)),
+			__("Register Device")
+		);
+	}
+
+	register_service() {
+		frappe.prompt(
+			[
+				{ fieldname: "user", label: __("Host User"), fieldtype: "Link", options: "User", reqd: 1 },
+				{ fieldname: "public_key", label: __("WireGuard Public Key"), fieldtype: "Data", reqd: 1 },
+				{
+					fieldname: "endpoint",
+					label: __("UDP Endpoint"),
+					fieldtype: "Data",
+					description: __("Required for the hub"),
+				},
+			],
+			(values) =>
+				this.call("register_service", values, (peer) => frappe.set_route("Form", "VPN Peer", peer.name)),
+			__("Register Service")
+		);
+	}
+
+	set_hub() {
+		frappe.prompt(
+			{
+				fieldname: "peer",
+				label: __("Service Peer"),
+				fieldtype: "Link",
+				options: "VPN Peer",
+				reqd: 1,
+				get_query: () => ({ filters: { kind: "Service", enabled: 1 } }),
+			},
+			(values) => this.call("set_hub", values),
+			__("Set Hub")
+		);
+	}
+
+	show_status(status) {
+		const rows = status.hosts.map(
+			(host) => `<tr>
 			<td>${frappe.utils.get_form_link("VPN Peer", host.name, true, frappe.utils.escape_html(host.address))}</td>
 			<td>${frappe.utils.escape_html(host.user)}</td>
 			<td>${host.required ? __("Yes") : __("No")}</td>
-			<td>${pill(host.current, __("Current"), __("Pending"))}</td>
+			<td><span class="indicator-pill ${
+				host.current ? "green" : host.reported_at && !host.apply_success ? "red" : "orange"
+			}">${
+				host.current ? __("Current") : host.reported_at && !host.apply_success ? __("Failed") : __("Pending")
+			}</span></td>
 			<td>${host.reported_revision ?? ""}</td>
 			<td>${host.reported_at ? frappe.datetime.comment_when(host.reported_at) : ""}</td>
-		</tr>`,
-	);
-	new frappe.ui.Dialog({
-		title: __("Revision {0}: {1}", [status.revision, status.all_current ? __("all hosts current") : __("hosts pending")]),
-		size: "large",
-		fields: [
-			{
-				fieldtype: "HTML",
-				options: `<table class="table table-bordered small">
-					<tr><th>${__("Host")}</th><th>${__("Owner")}</th><th>${__("Active")}</th><th>${__("Applied")}</th><th>${__("Revision")}</th><th>${__("Reported")}</th></tr>
-					${rows.join("")}
-				</table>`,
-			},
-		],
-	}).show();
+		</tr>`
+		);
+		new frappe.ui.Dialog({
+			title: __("Revision {0}: {1}", [
+				status.revision,
+				status.all_current ? __("all hosts current") : __("hosts pending"),
+			]),
+			size: "large",
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `<table class="table table-bordered small">
+				<tr><th>${__("Host")}</th><th>${__("Owner")}</th><th>${__("Active")}</th><th>${__("Applied")}</th><th>${__(
+						"Revision"
+					)}</th><th>${__("Reported")}</th></tr>
+				${rows.join("")}
+			</table>`,
+				},
+			],
+		}).show();
+	}
 }

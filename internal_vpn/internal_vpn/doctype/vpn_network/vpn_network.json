@@ -13,18 +13,21 @@
     {
       "fieldname": "subnet",
       "label": "Subnet",
-      "fieldtype": "Data"
+      "fieldtype": "Data",
+      "read_only": 1
     },
     {
       "fieldname": "revision",
       "label": "Revision",
-      "fieldtype": "Int"
+      "fieldtype": "Int",
+      "read_only": 1
     },
     {
       "fieldname": "hub",
       "label": "Hub",
       "fieldtype": "Link",
-      "options": "VPN Peer"
+      "options": "VPN Peer",
+      "read_only": 1
     }
   ],
   "permissions": [
@@ -36,5 +39,6 @@
       "role": "VPN Engineer",
       "read": 1
     }
-  ]
+  ],
+  "track_changes": 1
 }

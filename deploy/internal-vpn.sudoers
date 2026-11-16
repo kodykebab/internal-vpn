@@ -1,0 +1,2 @@
+# Replace frappe with the hub's bench OS user. Install with visudo.
+frappe ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block internal-vpn-update.service

@@ -4,12 +4,15 @@ import frappe
 from frappe.model.document import Document
 
 from internal_vpn.host import WireGuard
-from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import ROLE_FOR_KIND, VPNNetwork
+from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import ACTION_WRITE, ROLE_FOR_KIND, VPNNetwork
 
 
 class VPNPeer(Document):
-    """A service host or engineer device. A disabled peer keeps its address until `release`, so a host that has
-    not yet removed it can never route that address to a new peer."""
+    """A host or device. Reserve its address until the hub applies removal and `release` frees it."""
+
+    def before_validate(self):
+        if self.flags.vpn_action is not ACTION_WRITE:
+            frappe.throw("Use the VPN action methods to change membership")
 
     def validate(self):
         try:
@@ -21,6 +24,9 @@ class VPNPeer(Document):
 
     def on_trash(self):
         frappe.throw("Disable the peer, then release it")
+
+    def before_rename(self, *args, **kwargs):
+        frappe.throw("VPN records cannot be renamed")
 
     def lock(self) -> VPNNetwork:
         """Lock the network, then this peer, in the same order as every membership change."""
@@ -44,7 +50,7 @@ class VPNPeer(Document):
         return network
 
     def save_membership(self, network: VPNNetwork) -> dict:
-        self.save(ignore_permissions=True)
+        network.save_document(self)
         return {"revision": network.advance_revision()}
 
     @frappe.whitelist(methods=["GET"])
@@ -53,8 +59,7 @@ class VPNPeer(Document):
 
     @frappe.whitelist(methods=["POST"])
     def report(self, revision, success, digest=None):
-        """Record what a host applied. `get_status` compares the digest with desired state, so a report for an
-        older revision is accepted and simply shows as not current."""
+        """Record applied state. Status compares its digest with current membership."""
         if type(revision) is not int or revision < 1:
             frappe.throw("Expected a positive integer revision")
         if type(success) is not bool:
@@ -84,12 +89,16 @@ class VPNPeer(Document):
         network = self.lock_for_editor()
         if self.name == network.hub and not enabled:
             frappe.throw("The hub must stay enabled")
+        if self.enabled == int(enabled):
+            return {"revision": network.revision}
         self.enabled = int(enabled)
         return self.save_membership(network)
 
     @frappe.whitelist(methods=["POST"])
     def rotate_key(self, public_key):
         network = self.lock_for_editor()
+        if self.public_key == public_key:
+            return {"revision": network.revision}
         self.public_key = public_key
         return self.save_membership(network)
 
@@ -110,6 +119,14 @@ class VPNPeer(Document):
         network = self.lock_for_editor()
         if self.kind != "Service":
             frappe.throw("Device endpoints are learned by WireGuard")
+        if self.name == network.hub and not endpoint:
+            frappe.throw("The hub requires a UDP endpoint")
+        try:
+            endpoint = WireGuard.parse_endpoint(endpoint) if endpoint else None
+        except (TypeError, ValueError) as error:
+            frappe.throw(str(error))
+        if (self.endpoint or None) == endpoint:
+            return {"revision": network.revision}
         self.endpoint = endpoint
         return self.save_membership(network)
 

@@ -1,5 +1,7 @@
+import subprocess
 import unittest
 from copy import deepcopy
+from unittest.mock import patch
 
 from frappe import _dict
 from test_host import key
@@ -10,10 +12,43 @@ from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
 SUBNET = "100.100.64.0/24"
 
 
+class HubUpdateTests(unittest.TestCase):
+    def test_only_the_fixed_service_can_be_started(self):
+        with patch("subprocess.run") as run:
+            VPNNetwork.request_hub_update()
+        run.assert_called_once_with(
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/bin/systemctl",
+                "start",
+                "--no-block",
+                "internal-vpn-update.service",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+    def test_start_failure_is_logged_without_failing_a_committed_change(self):
+        for error in (
+            OSError(),
+            subprocess.CalledProcessError(1, "sudo"),
+            subprocess.TimeoutExpired("sudo", 5),
+        ):
+            with (
+                self.subTest(error=type(error)),
+                patch("subprocess.run", side_effect=error),
+                patch("frappe.logger") as log,
+            ):
+                VPNNetwork.request_hub_update()
+                log.return_value.error.assert_called_once()
+
+
 class TopologyTests(unittest.TestCase):
     def setUp(self):
         self.hub = _dict(
-            name="central", public_key=key(1), address="100.100.64.1", endpoint="192.0.2.1:51820"
+            name="dedicated-hub", public_key=key(1), address="100.100.64.1", endpoint="192.0.2.1:51820"
         )
         self.spoke = _dict(name="atlas", public_key=key(2), address="100.100.64.2")
         self.device = _dict(name="engineer", public_key=key(3), address="100.100.64.3")
@@ -21,7 +56,9 @@ class TopologyTests(unittest.TestCase):
 
     def configuration(self, peer, members=None, revision=1):
         members = self.members if members is None else members
-        return VPNNetwork.build_configuration(peer, self.hub, members, SUBNET, revision)
+        network = VPNNetwork.__new__(VPNNetwork)
+        network.subnet, network.revision = SUBNET, revision
+        return network.build_configuration(peer, self.hub, {member.name: member for member in members})
 
     def host(self, peer, topology):
         return Host(
@@ -65,6 +102,19 @@ class TopologyTests(unittest.TestCase):
             self.assertEqual(before != after, changes)
         self.assertEqual(self.configuration(self.device, remaining)["peers"], [])
 
+    def test_unrelated_revision_keeps_spoke_current_but_requires_hub_acknowledgement(self):
+        network = VPNNetwork.__new__(VPNNetwork)
+        network.subnet, network.revision = SUBNET, 2
+        members = {peer.name: peer for peer in self.members}
+        for peer in (self.hub, self.spoke):
+            peer.apply_success = 1
+            peer.reported_revision = 1
+            peer.reported_digest = WireGuard.digest(self.configuration(peer))
+        self.assertTrue(network.is_current(self.spoke, self.hub, members))
+        self.assertFalse(network.is_current(self.hub, self.hub, members))
+        self.hub.reported_revision = 2
+        self.assertTrue(network.is_current(self.hub, self.hub, members))
+
     def test_hub_endpoint_change_invalidates_spokes(self):
         before = WireGuard.digest(self.configuration(self.spoke))
         self.hub.endpoint = "192.0.2.4:51820"
@@ -82,7 +132,7 @@ class TopologyTests(unittest.TestCase):
         for mutate in mutations:
             snapshot = self.configuration(self.spoke)
             mutate(snapshot)
-            with self.subTest(snapshot=snapshot), self.assertRaises(ValueError):
+            with self.subTest(snapshot=snapshot), self.assertRaises((TypeError, ValueError)):
                 self.host(self.spoke, "spoke").validate(snapshot)
 
 

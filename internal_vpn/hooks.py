@@ -5,6 +5,16 @@ app_description = "Internal VPN control plane"
 app_email = "developers@frappe.io"
 app_license = "mit"
 
+add_to_apps_screen = [
+    {
+        "name": "internal_vpn",
+        "title": "Internal VPN",
+        "logo": "/assets/frappe/images/frappe-framework-logo.svg",
+        "route": "/desk/vpn-network/default",
+        "has_permission": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.has_desk_access",
+    }
+]
+
 after_install = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.after_install"
 auth_hooks = ["internal_vpn.wsgi.require_login"]
 doc_events = {
