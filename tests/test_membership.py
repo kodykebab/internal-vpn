@@ -2,12 +2,14 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import frappe
+import frappe.app
 from frappe.handler import run_doc_method
 from test_host import key
 from werkzeug.test import Client
@@ -15,7 +17,6 @@ from werkzeug.wrappers import Request, Response
 
 from internal_vpn.host import Host, WireGuard
 from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
-from internal_vpn.wsgi import application
 
 SITES = os.environ.get("VPN_TEST_SITES_PATH")
 SITE = os.environ.get("VPN_TEST_SITE")
@@ -117,6 +118,17 @@ class MembershipTests(unittest.TestCase):
             success=True,
             digest=WireGuard.digest(snapshot),
         )
+
+    @contextmanager
+    def http(self, **options):
+        """A WSGI client for this site; the test's own connection is restored afterwards."""
+        frappe.destroy()
+        try:
+            with patch("frappe.app._site", SITE), patch("frappe.app._sites_path", SITES):
+                yield Client(frappe.app.application, Response, **options)
+        finally:
+            frappe.init(SITE, sites_path=SITES)
+            frappe.connect()
 
     def test_hub_endpoint_cannot_be_cleared(self):
         revision = frappe.db.get_value("VPN Network", "default", "revision")
@@ -405,45 +417,35 @@ class MembershipTests(unittest.TestCase):
         headers = {"Authorization": f"token {user.api_key}:{user.api_secret}"}
         user.save()
         frappe.db.commit()
-        frappe.destroy()
         payload = {"dt": "VPN Peer", "dn": self.hub["name"], "method": "get_configuration"}
-        try:
-            with (
-                patch.dict(os.environ, {"VPN_SITE": SITE}),
-                patch("frappe.app._site", SITE),
-                patch("frappe.app._sites_path", SITES),
-            ):
-                client = Client(application, Response)
-                path = "/api/method/run_doc_method"
-                with client.get(path, query_string=payload) as response:
-                    self.assertEqual(response.status_code, 401)
-                with client.get(path, query_string=payload, headers=headers) as response:
-                    self.assertEqual(response.status_code, 200)
-                    snapshot = response.get_json()["message"]
-                payload.update(
-                    method="report",
-                    args={
-                        "revision": snapshot["revision"],
-                        "success": True,
-                        "digest": WireGuard.digest(snapshot),
-                    },
-                )
-                with client.post(path, json=payload, headers=headers) as response:
-                    self.assertEqual(response.status_code, 200)
-                    self.assertTrue(response.get_json()["message"]["accepted"])
-                with client.get(
-                    path,
-                    query_string={
-                        "dt": "VPN Peer",
-                        "dn": self.hub["name"],
-                        "method": "report",
-                    },
-                    headers=headers,
-                ) as response:
-                    self.assertEqual(response.status_code, 403)
-        finally:
-            frappe.init(SITE, sites_path=SITES)
-            frappe.connect()
+        with self.http() as client:
+            path = "/api/method/run_doc_method"
+            with client.get(path, query_string=payload) as response:
+                self.assertEqual(response.status_code, 401)
+            with client.get(path, query_string=payload, headers=headers) as response:
+                self.assertEqual(response.status_code, 200)
+                snapshot = response.get_json()["message"]
+            payload.update(
+                method="report",
+                args={
+                    "revision": snapshot["revision"],
+                    "success": True,
+                    "digest": WireGuard.digest(snapshot),
+                },
+            )
+            with client.post(path, json=payload, headers=headers) as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.get_json()["message"]["accepted"])
+            with client.get(
+                path,
+                query_string={
+                    "dt": "VPN Peer",
+                    "dn": self.hub["name"],
+                    "method": "report",
+                },
+                headers=headers,
+            ) as response:
+                self.assertEqual(response.status_code, 403)
 
     def test_desktop_entry_is_scoped_to_vpn_desk_roles(self):
         from frappe.apps import get_apps
@@ -458,72 +460,52 @@ class MembershipTests(unittest.TestCase):
                     self.assertEqual(apps["internal_vpn"]["route"], "/desk/vpn-network/default")
 
     def test_guest_page_assets_do_not_allow_other_commands(self):
-        frappe.destroy()
-        try:
-            with (
-                patch.dict(os.environ, {"VPN_SITE": SITE}),
-                patch("frappe.app._site", SITE),
-                patch("frappe.app._sites_path", SITES),
-            ):
-                client = Client(application, Response, use_cookies=False)
-                paths = (
-                    "/website_script.js",
-                    "/api/method/frappe.translate.get_boot_translations",
-                )
-                for path in paths:
-                    with self.subTest(path=path), client.get(path) as response:
-                        self.assertEqual(response.status_code, 200)
-                    with client.get(path, query_string={"cmd": "frappe.client.get_list"}) as response:
-                        self.assertEqual(response.status_code, 401)
-                with client.get("/api/resource/VPN Peer") as response:
+        with self.http(use_cookies=False) as client:
+            paths = (
+                "/website_script.js",
+                "/api/method/frappe.translate.get_boot_translations",
+            )
+            for path in paths:
+                with self.subTest(path=path), client.get(path) as response:
+                    self.assertEqual(response.status_code, 200)
+                with client.get(path, query_string={"cmd": "frappe.client.get_list"}) as response:
                     self.assertEqual(response.status_code, 401)
-                with client.post("/website_script.js") as response:
-                    self.assertEqual(response.status_code, 401)
-        finally:
-            frappe.init(SITE, sites_path=SITES)
-            frappe.connect()
+            with client.get("/api/resource/VPN Peer") as response:
+                self.assertEqual(response.status_code, 401)
+            with client.post("/website_script.js") as response:
+                self.assertEqual(response.status_code, 401)
 
     def test_invitation_password_setup_uses_frappes_token_validation(self):
         frappe.set_user("Administrator")
         link = frappe.get_doc("User", ENGINEER)._reset_password(send_email=False)
         token = parse_qs(urlsplit(link).query)["key"][0]
         frappe.db.commit()
-        frappe.destroy()
-        try:
-            with (
-                patch.dict(os.environ, {"VPN_SITE": SITE}),
-                patch("frappe.app._site", SITE),
-                patch("frappe.app._sites_path", SITES),
-            ):
-                client = Client(application, Response, use_cookies=False)
-                path = "/api/method/frappe.core.doctype.user.user.update_password"
-                password = "Unique-Test-Password-" + frappe.generate_hash(length=20)
-                with client.get("/update-password", query_string={"key": token}) as response:
-                    self.assertEqual(response.status_code, 200)
-                with client.post(
-                    "/",
-                    headers={"Accept": "application/json"},
-                    data={
-                        "cmd": "frappe.core.doctype.user.user.test_password_strength",
-                        "new_password": password,
-                    },
-                ) as response:
-                    self.assertEqual(response.status_code, 200)
-                with client.post(path, json={"key": "invalid", "new_password": password}) as response:
-                    self.assertEqual(response.status_code, 410)
-                with client.post(path, json={"key": token, "new_password": password}) as response:
-                    self.assertEqual(response.status_code, 200)
-                with client.post(path, json={"key": token, "new_password": password + "-again"}) as response:
-                    self.assertEqual(response.status_code, 410)
-                with client.post(
-                    "/",
-                    headers={"Accept": "application/json"},
-                    data={"cmd": "frappe.client.get_list", "doctype": "User"},
-                ) as response:
-                    self.assertEqual(response.status_code, 401)
-        finally:
-            frappe.init(SITE, sites_path=SITES)
-            frappe.connect()
+        with self.http(use_cookies=False) as client:
+            path = "/api/method/frappe.core.doctype.user.user.update_password"
+            password = "Unique-Test-Password-" + frappe.generate_hash(length=20)
+            with client.get("/update-password", query_string={"key": token}) as response:
+                self.assertEqual(response.status_code, 200)
+            with client.post(
+                "/",
+                headers={"Accept": "application/json"},
+                data={
+                    "cmd": "frappe.core.doctype.user.user.test_password_strength",
+                    "new_password": password,
+                },
+            ) as response:
+                self.assertEqual(response.status_code, 200)
+            with client.post(path, json={"key": "invalid", "new_password": password}) as response:
+                self.assertEqual(response.status_code, 410)
+            with client.post(path, json={"key": token, "new_password": password}) as response:
+                self.assertEqual(response.status_code, 200)
+            with client.post(path, json={"key": token, "new_password": password + "-again"}) as response:
+                self.assertEqual(response.status_code, 410)
+            with client.post(
+                "/",
+                headers={"Accept": "application/json"},
+                data={"cmd": "frappe.client.get_list", "doctype": "User"},
+            ) as response:
+                self.assertEqual(response.status_code, 401)
 
     def test_owner_eligibility_changes_membership_and_revision(self):
         device = self.device()

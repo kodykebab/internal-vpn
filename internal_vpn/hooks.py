@@ -16,7 +16,7 @@ add_to_apps_screen = [
 ]
 
 after_install = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.after_install"
-auth_hooks = ["internal_vpn.wsgi.require_login"]
+auth_hooks = ["internal_vpn.auth.require_login"]
 doc_events = {
     "User": {
         "on_update": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.on_user_change",

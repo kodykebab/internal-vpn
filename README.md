@@ -26,7 +26,7 @@ Engineer devices --WireGuard--> Dedicated hub --WireGuard--> Central / Atlas / C
 | `internal_vpn/internal_vpn/doctype/vpn_network` | Address allocation, revisions, hub selection, snapshots, status, User change hook |
 | `internal_vpn/internal_vpn/doctype/vpn_peer` | One service or device: key, endpoint, enablement, configuration fetch, apply report |
 | `internal_vpn/host.py` | Host agent: `update` applies membership, `measure` prints read-only metrics. Standard library only. |
-| `internal_vpn/wsgi.py` | Headless entrypoint and guest denial |
+| `internal_vpn/auth.py` | Guest denial |
 | `deploy/` | systemd units, hub firewall template and [host operations](deploy/README.md) |
 
 ## API
@@ -39,11 +39,11 @@ All methods are whitelisted on the DocTypes. In Desk, select **Internal VPN** to
 | VPN Engineer | `VPN Network`: `register_device`. `VPN Peer`: `get_configuration`, `set_enabled`, `rotate_key`, `release` on their own devices |
 | VPN Host | `VPN Peer`: `get_configuration` and `report` on its own service. Use one user per host. |
 
-Managers can read all peers; other VPN users can read only their own. Membership changes use action methods, including for Administrator; Frappe Version records edits. VPN roles have no generic write permission. Enrollment is capped at one hub and 10,000 other peers, including disabled peers. This is an input limit; sustainable capacity has not been established.
+Managers can read all peers; other VPN users can read only their own. Membership changes use action methods, including for Administrator; Frappe Version records edits. VPN roles have no generic write permission. Enrollment is capped at one hub and 10,000 other peers, including disabled peers.
 
 ## Install
 
-Install `internal_vpn` on a dedicated Frappe site on the hub, with Python 3.14 or later. Guest access is limited to login and password setup/recovery. Use the standard bench web process; `internal_vpn.wsgi:application` is an optional single-site entrypoint selected with `VPN_SITE`. See [host operations](deploy/README.md) for the updater and sudoers rule.
+Install `internal_vpn` on a dedicated Frappe site on the hub, with Python 3.14 or later. Guest access is limited to login and password setup/recovery. Deploy it with Pilot or bench like any Frappe site. See [host operations](deploy/README.md) for the updater and sudoers rule.
 
 Bootstrap the site's Administrator with `bench --site <site> set-admin-password`. Use User in Desk to invite engineers and assign `VPN Engineer`; give VPN operators `VPN Manager`. Creating accounts and assigning roles requires Administrator or System Manager. Disable public signup in Website Settings.
 
