@@ -50,7 +50,7 @@ Frappe starts the hub updater after membership commits using `sudo -n /usr/bin/s
 | Disable a device | `set_enabled(0)`, then confirm `hub_current` in `get_status`. An eligible engineer can re-enable their device or register another. |
 | Revoke a user | Disable the User, or remove their `VPN Engineer` / `VPN Host` role, then confirm `hub_current`. The hub account must remain eligible. |
 | Free an address | After the removal, `release` the disabled peer. It fails until the hub has applied the removal. Frappe keeps the record in Deleted Document. |
-| Rotate a key | `rotate_key`, then set the new private key and `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
+| Rotate a key | `rotate_key`, then install the new private key on `ivpn0` through provisioning and set `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
 | Rotate a host credential | Change the user's API secret, then update `token` in `host.json`. Membership does not change. |
 
 Agent errors include a safe `stage` (configuration, state, fetch, validation, apply, report or measurement); exception details and credentials are omitted. Check the JSON in the unit journal.
