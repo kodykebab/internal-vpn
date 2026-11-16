@@ -27,15 +27,12 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 class WireGuard:
     """A local WireGuard interface. The static parsers are shared with the VPN DocTypes."""
 
-    def __init__(self, interface: str, namespace: str | None = None):
+    def __init__(self, interface: str):
         if not isinstance(interface, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,15}", interface):
             raise ValueError("Invalid local interface")
         self.interface = interface
-        self.namespace = namespace
 
     def execute(self, *command: str, timeout: int = 15, check: bool = True) -> subprocess.CompletedProcess:
-        if self.namespace:
-            command = ("ip", "netns", "exec", self.namespace, *command)
         return subprocess.run(
             command,
             check=check,
@@ -71,7 +68,7 @@ class WireGuard:
     @staticmethod
     def parse_address(value, subnet: ipaddress.IPv4Network) -> ipaddress.IPv4Address:
         if not isinstance(value, str):
-            raise ValueError("Expected an IPv4 address")
+            raise TypeError("Expected an IPv4 address")
         address = ipaddress.IPv4Address(value)
         if address not in subnet or address in (subnet.network_address, subnet.broadcast_address):
             raise ValueError("Address outside the usable subnet")
@@ -80,7 +77,7 @@ class WireGuard:
     @staticmethod
     def parse_endpoint(value) -> str:
         if not isinstance(value, str):
-            raise ValueError("Expected an IPv4 endpoint and UDP port")
+            raise TypeError("Expected an IPv4 endpoint and UDP port")
         host, port = value.split(":")
         address = ipaddress.IPv4Address(host)
         if (
@@ -147,32 +144,39 @@ class ControlPlane:
 
 
 class Host:
-    """A VPN member host. Provisioning owns its key and interface; the control plane sends only public peers.
-
-    This module is copied alone to each host and run as root, so it uses only the standard library."""
+    """Apply public peers; provisioning owns the interface and private key."""
 
     def __init__(self, config: dict):
         self.config = config
-        self.wireguard = WireGuard(config["interface"], config.get("namespace"))
+        self.stage = "configuration"
+        if config.get("namespace"):
+            raise ValueError("Run the agent in its host network namespace")
+        self.wireguard = WireGuard(config["interface"])
         self.subnet = WireGuard.parse_subnet(config["subnet"])
         self.address = WireGuard.parse_address(config["address"], self.subnet)
         self.public_key = WireGuard.validate_public_key(config["public_key"])
 
     def update(self, state: Path) -> dict:
         """Fetch, validate, apply and report current membership. Runs are serialized per host."""
+        self.stage = "state"
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (state / "lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            self.stage = "fetch"
             control_plane = ControlPlane(self.config)
             snapshot = control_plane.get_configuration()
+            self.stage = "validation"
             self.validate(snapshot)
             digest = WireGuard.digest(snapshot)
+            self.stage = "state"
             self.accept_revision(state / "revision.json", snapshot["revision"], digest)
+            self.stage = "apply"
             try:
                 self.apply(snapshot)
             except Exception:
                 control_plane.report(snapshot["revision"], None)
                 raise
+            self.stage = "report"
             control_plane.report(snapshot["revision"], digest)
             return {"revision": snapshot["revision"], "applied": True}
 
@@ -260,6 +264,7 @@ class Host:
 
     def measure(self, probes: list[str] = (), unit: str | None = None) -> dict:
         """Read-only sample: per-peer handshake age and counters, optional VPN pings and updater result."""
+        self.stage = "measurement"
         if len(probes) > MAX_PROBES:
             raise ValueError("Too many probes")
         targets = [WireGuard.parse_address(probe, self.subnet) for probe in probes]
@@ -359,6 +364,7 @@ def main():
         command.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
 
+    host = None
     try:
         metadata = args.config.stat()
         if os.geteuid() != 0 or metadata.st_uid != 0 or metadata.st_mode & 0o077:
@@ -366,9 +372,9 @@ def main():
         host = Host(json.loads(args.config.read_text()))
         result = host.update(args.state) if args.command == "update" else host.measure(args.probe, args.unit)
         print(json.dumps(result))
-    except Exception:
-        # Errors can contain credentials, commands or response bodies.
-        print(json.dumps({"ok": False, "error": f"{args.command} failed"}))
+    except Exception:  # noqa: BLE001 - never expose credentials from command or HTTP errors
+        stage = host.stage if host is not None else "configuration"
+        print(json.dumps({"ok": False, "error": f"{args.command} failed", "stage": stage}))
         raise SystemExit(1) from None
 
 

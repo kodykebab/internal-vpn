@@ -42,7 +42,9 @@ SNAPSHOT = {
 class UpdateTests(unittest.TestCase):
     def setUp(self):
         self.host = Host(CONFIG)
-        self.state = Path(tempfile.mkdtemp())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name)
 
     def test_rejects_untrusted_shapes_and_addresses(self):
         mutations = [
@@ -64,12 +66,12 @@ class UpdateTests(unittest.TestCase):
         for mutate in mutations:
             snapshot = deepcopy(SNAPSHOT)
             mutate(snapshot)
-            with self.subTest(snapshot=snapshot), self.assertRaises(ValueError):
+            with self.subTest(snapshot=snapshot), self.assertRaises((TypeError, ValueError)):
                 self.host.validate(snapshot)
 
     def test_endpoint_parser_rejects_commands_and_ports(self):
         for endpoint in ("host;echo bad:123", "192.0.2.2:65536", "0.0.0.0:1", None):
-            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+            with self.subTest(endpoint=endpoint), self.assertRaises((TypeError, ValueError)):
                 WireGuard.parse_endpoint(endpoint)
 
     def test_revision_survives_restart_rejects_stale_and_conflict(self):
@@ -101,6 +103,10 @@ class UpdateTests(unittest.TestCase):
         ):
             self.host.apply(SNAPSHOT)
         set_peer.assert_not_called()
+
+    def test_namespace_config_cannot_target_the_host_interface(self):
+        with self.assertRaises(ValueError):
+            Host(dict(CONFIG, namespace="old-lab"))
 
     def update(self, snapshot=SNAPSHOT, apply=None, report=None):
         with (
@@ -152,21 +158,41 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             NoRedirect().redirect_request(None, None, 302, "redirect", {}, "https://other.example")
 
-    def test_cli_failure_hides_errors(self):
+    def test_cli_failure_reports_stage_without_exception_details(self):
         config = self.state / "host.json"
         config.write_text(json.dumps(CONFIG))
-        output = io.StringIO()
-        with (
-            patch("sys.argv", ["host.py", "update", "--config", str(config), "--state", str(self.state)]),
-            patch("os.geteuid", return_value=0),
-            patch("pathlib.Path.stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100600)),
-            patch.object(Host, "update", side_effect=OSError("secret-must-not-appear")),
-            patch("sys.stdout", output),
-            self.assertRaises(SystemExit) as error,
+        for target, stage in (
+            ("internal_vpn.host.Host.__init__", "configuration"),
+            ("internal_vpn.host.ControlPlane.get_configuration", "fetch"),
+            ("internal_vpn.host.Host.validate", "validation"),
+            ("internal_vpn.host.Host.accept_revision", "state"),
+            ("internal_vpn.host.Host.apply", "apply"),
+            ("internal_vpn.host.ControlPlane.report", "report"),
         ):
-            main()
-        self.assertEqual(error.exception.code, 1)
-        self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "update failed"})
+            output = io.StringIO()
+            with (
+                self.subTest(stage=stage),
+                patch("sys.argv", ["host.py", "update", "--config", str(config), "--state", str(self.state)]),
+                patch("os.geteuid", return_value=0),
+                patch("pathlib.Path.stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100600)),
+                patch.object(ControlPlane, "get_configuration", return_value=SNAPSHOT),
+                patch.object(ControlPlane, "report"),
+                patch.object(Host, "apply"),
+                patch(target, side_effect=OSError("secret-must-not-appear")),
+                patch("sys.stdout", output),
+                self.assertRaises(SystemExit) as error,
+            ):
+                main()
+            self.assertEqual(error.exception.code, 1)
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"ok": False, "error": "update failed", "stage": stage},
+            )
+
+    def test_apply_and_failure_report_errors_keep_apply_stage(self):
+        with self.assertRaises(OSError):
+            self.update(apply=OSError("apply secret"), report=OSError("report secret"))
+        self.assertEqual(self.host.stage, "apply")
 
 
 class MeasureTests(unittest.TestCase):
