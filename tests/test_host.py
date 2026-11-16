@@ -84,16 +84,36 @@ class UpdateTests(unittest.TestCase):
         Host.accept_revision(path, 4, "four")
         self.assertEqual(json.loads(path.read_text())["revision"], 4)
 
-    def test_removal_precedes_updates_and_private_key_is_untouched(self):
+    def apply(self, *rows, host=None, snapshot=SNAPSHOT):
+        """Apply over live `wg show` rows of (key, allowed IPs, endpoint, keepalive)."""
+        columns = ["\n".join(f"{row[0]}\t{row[i]}" for row in rows) for i in (1, 2, 3)]
         with (
-            patch.object(WireGuard, "show", side_effect=[key(1), key(3)]),
+            patch.object(WireGuard, "show", side_effect=[(host or self.host).public_key, *columns]),
             patch.object(WireGuard, "set_peer") as set_peer,
         ):
-            self.host.apply(SNAPSHOT)
-        calls = [call.args for call in set_peer.call_args_list]
+            (host or self.host).apply(snapshot)
+        return [call.args for call in set_peer.call_args_list]
+
+    def test_removal_precedes_updates_and_private_key_is_untouched(self):
+        calls = self.apply((key(3), "100.100.64.3/32", "(none)", "off"))
         self.assertEqual(calls[0], (key(3), "remove"))
         self.assertIn("100.100.64.2/32", calls[1])
         self.assertNotIn("private-key", str(calls))
+
+    def test_unchanged_peers_are_skipped_and_drift_is_corrected(self):
+        self.assertEqual(self.apply((key(2), "100.100.64.2/32", "198.51.100.7:4000", "off")), [])
+        for drift in (("100.100.64.9/32", "(none)", "off"), ("100.100.64.2/32", "(none)", "25")):
+            with self.subTest(drift=drift):
+                self.assertEqual(len(self.apply((key(2), *drift))), 1)
+
+    def test_spoke_pins_hub_endpoint_and_keepalive(self):
+        spoke = Host(dict(CONFIG, topology="spoke", address="100.100.64.2", public_key=key(2)))
+        hub = {"public_key": key(1), "address": "100.100.64.1", "endpoint": "192.0.2.1:51820"}
+        snapshot = dict(SNAPSHOT, topology="spoke", peers=[dict(hub, allowed_ips="100.100.64.0/24")])
+        current = (key(1), "100.100.64.0/24", "192.0.2.1:51820", "25")
+        self.assertEqual(self.apply(current, host=spoke, snapshot=snapshot), [])
+        moved = (key(1), "100.100.64.0/24", "192.0.2.5:51820", "25")
+        self.assertIn("192.0.2.1:51820", self.apply(moved, host=spoke, snapshot=snapshot)[0])
 
     def test_wrong_interface_identity_prevents_mutation(self):
         with (

@@ -46,6 +46,17 @@ class WireGuard:
         # Never read dump or showconf: they contain private and preshared keys.
         return self.execute("wg", "show", self.interface, field).stdout.strip()
 
+    def peers(self) -> dict[str, tuple[str, str | None, str]]:
+        """Live allowed IPs, endpoint and keepalive per peer."""
+        fields = [
+            dict(line.split("\t", 1) for line in self.show(field).splitlines())
+            for field in ("allowed-ips", "endpoints", "persistent-keepalive")
+        ]
+        return {
+            key: (allowed, None if fields[1][key] == "(none)" else fields[1][key], fields[2][key])
+            for key, allowed in fields[0].items()
+        }
+
     def set_peer(self, public_key: str, *arguments: str):
         self.execute("wg", "set", self.interface, "peer", public_key, *arguments)
 
@@ -245,22 +256,32 @@ class Host:
                 os.unlink(temporary)
 
     def apply(self, snapshot: dict):
-        """Remove unwanted peers first, then set the wanted ones. The private key is never touched."""
+        """Remove unwanted peers first, then set changed ones. The private key is never touched."""
         if self.wireguard.show("public-key") != self.public_key:
             raise ValueError("Interface public key does not match host identity")
+        live = self.wireguard.peers()
         wanted = {peer["public_key"] for peer in snapshot["peers"]}
-        for key in sorted(set(self.wireguard.show("peers").splitlines()) - wanted):
+        for key in sorted(set(live) - wanted):
             self.wireguard.set_peer(key, "remove")
         for peer in snapshot["peers"]:
+            key, endpoint = peer["public_key"], peer["endpoint"]
+            current = live.get(key)
+            # Hub peers have learned endpoints, so only a pinned endpoint is compared.
+            if current and current == (
+                peer["allowed_ips"],
+                endpoint or current[1],
+                "25" if endpoint else "off",
+            ):
+                continue
             arguments = [
                 "allowed-ips",
                 peer["allowed_ips"],
                 "persistent-keepalive",
-                "25" if peer["endpoint"] else "0",
+                "25" if endpoint else "0",
             ]
-            if peer["endpoint"]:
-                arguments += ["endpoint", peer["endpoint"]]
-            self.wireguard.set_peer(peer["public_key"], *arguments)
+            if endpoint:
+                arguments += ["endpoint", endpoint]
+            self.wireguard.set_peer(key, *arguments)
 
     def measure(self, probes: list[str] = (), unit: str | None = None) -> dict:
         """Read-only sample: per-peer handshake age and counters, optional VPN pings and updater result."""
