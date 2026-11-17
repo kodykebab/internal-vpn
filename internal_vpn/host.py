@@ -87,18 +87,23 @@ class WireGuard:
 
     @staticmethod
     def parse_endpoint(value) -> str:
+        """`ipv4:port` or `[ipv6]:port`, normalized as `wg show` prints it."""
         if not isinstance(value, str):
-            raise TypeError("Expected an IPv4 endpoint and UDP port")
-        host, port = value.split(":")
-        address = ipaddress.IPv4Address(host)
+            raise TypeError("Expected an IP endpoint and UDP port")
+        host, _, port = value.rpartition(":")
+        if host.startswith("[") and host.endswith("]"):
+            address = ipaddress.IPv6Address(host[1:-1])
+        else:
+            address = ipaddress.IPv4Address(host)
         if (
             address.is_unspecified
             or address.is_multicast
+            or address.is_link_local
             or not port.isdecimal()
             or not 1 <= int(port) <= 65535
         ):
             raise ValueError("Invalid endpoint")
-        return f"{address}:{int(port)}"
+        return f"[{address}]:{int(port)}" if address.version == 6 else f"{address}:{int(port)}"
 
     @staticmethod
     def digest(snapshot: dict) -> str:

@@ -70,9 +70,24 @@ class UpdateTests(unittest.TestCase):
                 self.host.validate(snapshot)
 
     def test_endpoint_parser_rejects_commands_and_ports(self):
-        for endpoint in ("host;echo bad:123", "192.0.2.2:65536", "0.0.0.0:1", None):
+        for endpoint in (
+            "host;echo bad:123",
+            "192.0.2.2:65536",
+            "0.0.0.0:1",
+            None,
+            "169.254.1.1:51820",
+            "2001:db8::1:51820",
+            "[2001:db8::1]",
+            "[::]:51820",
+            "[fe80::1]:51820",
+            "[ff02::1]:51820",
+        ):
             with self.subTest(endpoint=endpoint), self.assertRaises((TypeError, ValueError)):
                 WireGuard.parse_endpoint(endpoint)
+
+    def test_endpoint_parser_normalizes_ipv4_and_ipv6(self):
+        self.assertEqual(WireGuard.parse_endpoint("192.0.2.1:051820"), "192.0.2.1:51820")
+        self.assertEqual(WireGuard.parse_endpoint("[2001:DB8:0::0001]:51820"), "[2001:db8::1]:51820")
 
     def test_revision_survives_restart_rejects_stale_and_conflict(self):
         path = self.state / "revision.json"
@@ -114,6 +129,9 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.apply(current, host=spoke, snapshot=snapshot), [])
         moved = (key(1), "100.100.64.0/24", "192.0.2.5:51820", "25")
         self.assertIn("192.0.2.1:51820", self.apply(moved, host=spoke, snapshot=snapshot)[0])
+        ipv6 = dict(snapshot, peers=[dict(snapshot["peers"][0], endpoint="[2001:db8::1]:51820")])
+        current = (key(1), "100.100.64.0/24", "[2001:db8::1]:51820", "25")
+        self.assertEqual(self.apply(current, host=spoke, snapshot=ipv6), [])
 
     def test_wrong_interface_identity_prevents_mutation(self):
         with (
