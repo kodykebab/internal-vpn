@@ -29,13 +29,13 @@ In Desk, **Internal VPN** opens the network. Form buttons call whitelisted DocTy
 
 | Role | Can |
 | --- | --- |
-| VPN Manager | Initialize, register services, add engineers, set the hub, view status. Disable, rotate or release any peer |
+| VPN Manager | Initialize, register services, add engineers, set the hub, view status, manage access. Disable, rotate or release any peer |
 | VPN Engineer | Register, view, disable, rotate and release their own devices |
 | VPN Host | Fetch its configuration and report back. One user per host |
 
 No role can edit VPN records directly. The network holds one hub and up to 10,000 other peers.
 
-The hub enforces who reaches whom: servers reach each other, members reach servers, and nothing on the VPN can open a connection to a device.
+The hub enforces who reaches whom. Servers reach each other, and nothing on the VPN can open a connection to a device. Devices reach every server, or with access control on, only servers granted through a `VPN Access: <name>` role their owner holds, optionally limited to ports.
 
 ## Install
 
@@ -54,7 +54,6 @@ Use a bench Python. Database tests run only with a throwaway site that has this 
 
 ## Open work
 
-- Per-engineer access to services.
 - Restrict internal endpoints of Central, Atlas and Cargo to the VPN.
 - Install the agent through host provisioning.
 - Send metrics to Datum and alert through Insights and Raven.

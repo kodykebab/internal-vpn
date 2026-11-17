@@ -26,6 +26,12 @@ class VPNNetworkForm {
 		frm.add_custom_button(__("Add Engineer"), () => this.add_engineer(), __("Network"));
 		if (!frm.doc.subnet) frm.add_custom_button(__("Initialize"), () => this.initialize(), __("Network"));
 		frm.add_custom_button(__("Register Service"), () => this.register_service(), __("Network"));
+		frm.add_custom_button(__("Access Roles"), () => this.access_roles(), __("Network"));
+		frm.add_custom_button(
+			frm.doc.access_control ? __("Turn Off Access Control") : __("Turn On Access Control"),
+			() => this.set_access_control(),
+			__("Network")
+		);
 		if (!frm.doc.hub) frm.add_custom_button(__("Set Hub"), () => this.set_hub(), __("Network"));
 		frm.add_custom_button(__("Status"), () =>
 			this.call("get_status", {}, (status) => this.show_status(status), "GET")
@@ -91,6 +97,42 @@ class VPNNetworkForm {
 			},
 		});
 		dialog.show();
+	}
+
+	access_roles() {
+		frappe.prompt(
+			{ fieldname: "user", label: __("User"), fieldtype: "Link", options: "User", reqd: 1 },
+			({ user }) =>
+				this.call(
+					"get_access_roles",
+					{ user },
+					(roles) => {
+						if (!roles.length) return frappe.msgprint(__("Add access roles on a service first."));
+						frappe.prompt(
+							{
+								fieldname: "roles",
+								label: __("Access Roles"),
+								fieldtype: "MultiCheck",
+								options: roles.map(({ role, held }) => ({ label: role, value: role, checked: held })),
+							},
+							(values) => this.call("set_access_roles", { user, roles: values.roles }),
+							__("Access Roles for {0}", [user])
+						);
+					},
+					"GET"
+				),
+			__("Access Roles")
+		);
+	}
+
+	set_access_control() {
+		const enabled = this.frm.doc.access_control ? 0 : 1;
+		frappe.confirm(
+			enabled
+				? __("Turn on access control? Devices will reach only services their access roles allow.")
+				: __("Turn off access control? Every device will reach every service."),
+			() => this.call("set_access_control", { enabled })
+		);
 	}
 
 	register_device() {

@@ -9,6 +9,7 @@ from internal_vpn.host import MAX_PEERS, WireGuard
 
 ACTION_WRITE = object()
 ROLE_FOR_KIND = {"Service": "VPN Host", "Device": "VPN Engineer"}
+ACCESS_ROLE_PREFIX = "VPN Access: "
 
 
 class VPNNetwork(Document):
@@ -137,8 +138,7 @@ class VPNNetwork(Document):
         frappe.db.commit()
 
     def build_configuration(self, peer, hub, members) -> dict:
-        """Protocol v3 snapshot. The hub lists every member as a /32, plus the servers for its rules;
-        a spoke lists only the hub."""
+        """Protocol v3 snapshot. The hub lists every member as a /32; a spoke lists only the hub."""
 
         def entry(member, endpoint, allowed_ips):
             return {
@@ -167,16 +167,54 @@ class VPNNetwork(Document):
             "address": peer.address,
             "public_key": peer.public_key,
             "peers": peers,
-            "access": {
-                "services": [
-                    m.address
-                    for _, m in sorted(members.items())
-                    if m.kind == "Service" and m.name != hub.name
-                ]
-            }
-            if is_hub
-            else None,
+            "access": self.build_access(members) if is_hub else None,
         }
+
+    def build_access(self, members) -> dict:
+        """Hub rules: servers reach each other, devices reach servers, and nothing opens a device.
+        With access control on, a device reaches a server only through an access role its owner holds."""
+        services = sorted(
+            (m for m in members.values() if m.kind == "Service" and m.name != self.hub), key=lambda m: m.name
+        )
+        access = {
+            "restricted": bool(self.access_control),
+            "services": [s.address for s in services],
+            "rules": [],
+        }
+        if not self.access_control:
+            return access
+        devices = sorted((m for m in members.values() if m.kind == "Device"), key=lambda m: m.name)
+        grants = frappe.get_all(
+            "VPN Access",
+            filters={"parenttype": "VPN Peer", "parent": ("in", [s.name for s in services] or [""])},
+            fields=["parent", "role", "ports"],
+            parent_doctype="VPN Peer",
+        )
+        held = {}
+        for row in frappe.get_all(
+            "Has Role",
+            filters={
+                "parenttype": "User",
+                "parent": ("in", [d.user for d in devices] or [""]),
+                "role": ("like", ACCESS_ROLE_PREFIX + "%"),
+            },
+            fields=["parent", "role"],
+            parent_doctype="User",
+        ):
+            held.setdefault(row.parent, set()).add(row.role)
+        for device in devices:
+            for service in services:
+                ports = [
+                    grant.ports or ""
+                    for grant in grants
+                    if grant.parent == service.name and grant.role in held.get(device.user, ())
+                ]
+                if ports:
+                    joined = "" if "" in ports else WireGuard.parse_ports(",".join(ports))
+                    access["rules"].append(
+                        {"source": device.address, "destination": service.address, "ports": joined}
+                    )
+        return access
 
     def add_peer(
         self, kind: str, user: str, public_key: str, label: str, endpoint: str | None = None
@@ -259,6 +297,52 @@ class VPNNetwork(Document):
         user.flags.ignore_permissions = True
         user.add_roles(ROLE_FOR_KIND["Device"])
         return {"user": user.name, "password": password}
+
+    @frappe.whitelist(methods=["GET"])
+    def get_access_roles(self, user):
+        """Every VPN access role, marked when the user holds it."""
+        frappe.only_for("VPN Manager")
+        roles = frappe.get_all(
+            "Role", filters={"name": ("like", ACCESS_ROLE_PREFIX + "%")}, pluck="name", order_by="name"
+        )
+        held = frappe.get_all(
+            "Has Role",
+            filters={"parenttype": "User", "parent": user, "role": ("in", roles or [""])},
+            pluck="role",
+            parent_doctype="User",
+        )
+        return [{"role": role, "held": role in held} for role in roles]
+
+    @frappe.whitelist(methods=["POST"])
+    def set_access_roles(self, user, roles):
+        """Replace a user's VPN access roles; their other roles stay."""
+        frappe.only_for("VPN Manager")
+        roles = set(frappe.parse_json(roles) if isinstance(roles, str) else roles or [])
+        if any(
+            not isinstance(role, str)
+            or not role.startswith(ACCESS_ROLE_PREFIX)
+            or not frappe.db.exists("Role", role)
+            for role in roles
+        ):
+            frappe.throw("Grant only existing VPN access roles")
+        doc = frappe.get_doc("User", user)
+        kept = [row.role for row in doc.roles if not row.role.startswith(ACCESS_ROLE_PREFIX)]
+        if {row.role for row in doc.roles} - set(kept) != roles:
+            doc.set("roles", [{"role": role} for role in kept + sorted(roles)])
+            doc.flags.ignore_permissions = True
+            doc.save()
+        return {"roles": sorted(roles)}
+
+    @frappe.whitelist(methods=["POST"])
+    def set_access_control(self, enabled):
+        frappe.only_for("VPN Manager")
+        if type(enabled) not in (bool, int) or enabled not in (0, 1):
+            frappe.throw("enabled must be 0 or 1")
+        self.lock()
+        if self.access_control != int(enabled):
+            self.access_control = int(enabled)
+            self.advance_revision()
+        return {"access_control": self.access_control}
 
     @frappe.whitelist(methods=["POST"])
     def register_device(self, public_key, label):
@@ -354,15 +438,18 @@ class VPNNetwork(Document):
         )
 
     def on_user_change(self, user, method: str):
-        """Track owner eligibility changes; keep the hub eligible."""
-        relevant = set(ROLE_FOR_KIND.values())
+        """Track owner eligibility and access role changes; keep the hub eligible."""
+
+        def relevant(doc):
+            return {
+                row.role
+                for row in doc.roles
+                if row.role in ROLE_FOR_KIND.values() or row.role.startswith(ACCESS_ROLE_PREFIX)
+            }
+
         roles = {row.role for row in user.roles}
         previous = user.get_doc_before_save()
-        unchanged = (
-            previous
-            and previous.enabled == user.enabled
-            and {row.role for row in previous.roles} & relevant == roles & relevant
-        )
+        unchanged = previous and previous.enabled == user.enabled and relevant(previous) == relevant(user)
         if method != "on_trash" and unchanged:
             return
 

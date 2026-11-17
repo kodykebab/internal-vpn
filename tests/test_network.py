@@ -57,7 +57,7 @@ class TopologyTests(unittest.TestCase):
     def configuration(self, peer, members=None, revision=1):
         members = self.members if members is None else members
         network = VPNNetwork.__new__(VPNNetwork)
-        network.subnet, network.revision = SUBNET, revision
+        network.subnet, network.revision, network.access_control = SUBNET, revision, 0
         return network.build_configuration(peer, self.hub, {member.name: member for member in members})
 
     def host(self, peer, topology):
@@ -104,7 +104,7 @@ class TopologyTests(unittest.TestCase):
 
     def test_unrelated_revision_keeps_spoke_current_but_requires_hub_acknowledgement(self):
         network = VPNNetwork.__new__(VPNNetwork)
-        network.subnet, network.revision = SUBNET, 2
+        network.subnet, network.revision, network.access_control = SUBNET, 2, 0
         members = {peer.name: peer for peer in self.members}
         for peer in (self.hub, self.spoke):
             peer.apply_success = 1

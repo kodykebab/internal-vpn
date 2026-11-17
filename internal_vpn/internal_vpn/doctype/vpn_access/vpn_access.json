@@ -1,0 +1,29 @@
+{
+  "doctype": "DocType",
+  "name": "VPN Access",
+  "module": "Internal VPN",
+  "istable": 1,
+  "engine": "InnoDB",
+  "field_order": [
+    "role",
+    "ports"
+  ],
+  "fields": [
+    {
+      "fieldname": "role",
+      "label": "Role",
+      "fieldtype": "Link",
+      "options": "Role",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "ports",
+      "label": "Ports",
+      "fieldtype": "Data",
+      "in_list_view": 1,
+      "description": "Empty for all ports; otherwise TCP and UDP ports such as 22,443,8000-8005"
+    }
+  ],
+  "permissions": []
+}

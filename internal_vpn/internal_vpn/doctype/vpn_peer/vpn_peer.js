@@ -40,6 +40,8 @@ class VPNPeerForm {
 			frappe.db.get_value("VPN Network", "default", "hub").then(({ message }) => {
 				if (!message.hub || message.hub === frm.doc.name)
 					frm.add_custom_button(__("Set Endpoint"), () => this.set_endpoint(), __("Peer"));
+				// The hub is never a destination, so access is set on other services only.
+				if (message.hub !== frm.doc.name) frm.add_custom_button(__("Access"), () => this.access(), __("Peer"));
 			});
 	}
 
@@ -55,6 +57,40 @@ class VPNPeerForm {
 
 	configuration() {
 		this.call("get_configuration", {}, (snapshot) => this.show_configuration(snapshot), "GET");
+	}
+
+	access() {
+		const prefix = "VPN Access: ";
+		const dialog = new frappe.ui.Dialog({
+			title: __("Access to {0}", [this.frm.doc.label || this.frm.doc.name]),
+			fields: [
+				{
+					fieldname: "rows",
+					fieldtype: "Table",
+					in_place_edit: true,
+					data: (this.frm.doc.access || []).map((row) => ({
+						role: row.role.replace(prefix, ""),
+						ports: row.ports,
+					})),
+					fields: [
+						{ fieldname: "role", label: __("Access Role"), fieldtype: "Data", in_list_view: 1, reqd: 1 },
+						{
+							fieldname: "ports",
+							label: __("Ports"),
+							fieldtype: "Data",
+							in_list_view: 1,
+							description: __("Empty for all ports, or 22,443,8000-8005"),
+						},
+					],
+				},
+			],
+			primary_action_label: __("Save"),
+			primary_action: ({ rows }) => {
+				dialog.hide();
+				this.call("set_access", { rows: (rows || []).map(({ role, ports }) => ({ role, ports })) });
+			},
+		});
+		dialog.show();
 	}
 
 	set_enabled() {

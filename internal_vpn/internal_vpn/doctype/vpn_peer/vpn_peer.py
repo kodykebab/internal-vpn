@@ -4,7 +4,12 @@ import frappe
 from frappe.model.document import Document
 
 from internal_vpn.host import WireGuard
-from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import ACTION_WRITE, ROLE_FOR_KIND, VPNNetwork
+from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import (
+    ACCESS_ROLE_PREFIX,
+    ACTION_WRITE,
+    ROLE_FOR_KIND,
+    VPNNetwork,
+)
 
 
 class VPNPeer(Document):
@@ -113,6 +118,36 @@ class VPNPeer(Document):
             frappe.throw("Wait until the hub has applied the removal")
         frappe.delete_doc(self.doctype, self.name, ignore_permissions=True, ignore_on_trash=True)
         return {"released": self.address}
+
+    @frappe.whitelist(methods=["POST"])
+    def set_access(self, rows):
+        """Replace the access roles, with optional ports, that let devices reach this service."""
+        network = self.lock_for_editor()
+        if self.kind != "Service":
+            frappe.throw("Access applies to services")
+        wanted = []
+        for row in frappe.parse_json(rows) if isinstance(rows, str) else rows or []:
+            name = (
+                str(row.get("role") or "").removeprefix(ACCESS_ROLE_PREFIX).strip()
+                if isinstance(row, dict)
+                else ""
+            )
+            if not re.fullmatch(r"[\w .-]{1,60}", name):
+                frappe.throw("Name each access role with letters, digits, spaces, dots or dashes")
+            try:
+                ports = WireGuard.parse_ports(row.get("ports") or "")
+            except (TypeError, ValueError) as error:
+                frappe.throw(str(error))
+            wanted.append({"role": ACCESS_ROLE_PREFIX + name, "ports": ports})
+        if wanted == [{"role": row.role, "ports": row.ports or ""} for row in self.access]:
+            return {"revision": network.revision}
+        for row in wanted:
+            if not frappe.db.exists("Role", row["role"]):
+                frappe.get_doc({"doctype": "Role", "role_name": row["role"], "desk_access": 0}).insert(
+                    ignore_permissions=True
+                )
+        self.set("access", wanted)
+        return self.save_membership(network)
 
     @frappe.whitelist(methods=["POST"])
     def set_endpoint(self, endpoint):

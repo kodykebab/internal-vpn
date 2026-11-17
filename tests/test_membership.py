@@ -71,7 +71,9 @@ class MembershipTests(unittest.TestCase):
         frappe.db.rollback()
         frappe.db.delete("VPN Peer")
         frappe.db.set_value(
-            "VPN Network", "default", {"hub": None, "subnet": None, "revision": 0, "hub_alert": None}
+            "VPN Network",
+            "default",
+            {"hub": None, "subnet": None, "revision": 0, "hub_alert": None, "access_control": 0},
         )
         for email in (ENGINEER, OTHER, HUB, SPOKE):
             user = frappe.get_doc("User", email)
@@ -608,12 +610,57 @@ class MembershipTests(unittest.TestCase):
         self.assertTrue(hub["current"] and hub["stale"])
         self.assertFalse(status["all_current"])
 
-    def test_hub_snapshot_lists_servers_and_spokes_get_no_rules(self):
+    def test_access_roles_are_fenced_and_managed_by_managers(self):
         service = self.network("register_service", user=SPOKE, public_key=key(2), label="service")
-        self.device()
-        hub = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertEqual(hub["access"], {"services": [service["address"]]})
-        self.assertIsNone(self.peer(service["name"], "get_configuration", actor=SPOKE)["access"])
+        with self.assertRaises(frappe.PermissionError):
+            self.peer(service["name"], "set_access", actor=ENGINEER, rows=[{"role": "ops"}])
+        with self.assertRaises(frappe.ValidationError):
+            self.peer(service["name"], "set_access", rows=[{"role": "ops", "ports": "22;"}])
+        self.peer(service["name"], "set_access", rows=[{"role": "ops", "ports": "443,22"}])
+        rows = frappe.get_doc("VPN Peer", service["name"]).access
+        self.assertEqual([(row.role, row.ports) for row in rows], [("VPN Access: ops", "22,443")])
+        for roles in (["System Manager"], ["VPN Manager"], ["VPN Access: missing"]):
+            with self.subTest(roles=roles), self.assertRaises(frappe.ValidationError):
+                self.network("set_access_roles", user=ENGINEER, roles=roles)
+        with self.assertRaises(frappe.PermissionError):
+            self.network("set_access_roles", actor=ENGINEER, user=ENGINEER, roles=["VPN Access: ops"])
+        self.network("set_access_roles", user=ENGINEER, roles=["VPN Access: ops"])
+        self.assertTrue({"VPN Engineer", "VPN Access: ops"} <= set(frappe.get_roles(ENGINEER)))
+        self.assertIn(
+            {"role": "VPN Access: ops", "held": True}, self.network("get_access_roles", user=ENGINEER)
+        )
+
+    def test_access_control_rules_follow_roles_and_ports(self):
+        service = self.network("register_service", user=SPOKE, public_key=key(2), label="service")
+        device = self.device()
+        self.peer(service["name"], "set_access", rows=[{"role": "db", "ports": "5432"}])
+
+        def hub():
+            return self.peer(self.hub["name"], "get_configuration", actor=HUB)
+
+        self.assertEqual(
+            hub()["access"], {"restricted": False, "services": [service["address"]], "rules": []}
+        )
+        self.network("set_access_control", enabled=1)
+        closed = hub()
+        self.assertEqual(
+            closed["access"], {"restricted": True, "services": [service["address"]], "rules": []}
+        )
+        spoke = self.peer(service["name"], "get_configuration", actor=SPOKE)
+        self.network("set_access_roles", user=ENGINEER, roles=["VPN Access: db"])
+        granted = hub()
+        self.assertGreater(granted["revision"], closed["revision"])
+        rule = {"source": device["address"], "destination": service["address"], "ports": "5432"}
+        self.assertEqual(granted["access"]["rules"], [rule])
+        unchanged = self.peer(service["name"], "get_configuration", actor=SPOKE)
+        self.assertIsNone(unchanged["access"])
+        self.assertEqual(WireGuard.digest(unchanged), WireGuard.digest(spoke))
+        self.peer(service["name"], "set_access", rows=[{"role": "db", "ports": "5432"}, {"role": "db"}])
+        self.assertEqual(hub()["access"]["rules"][0]["ports"], "")
+        self.network("set_access_roles", user=ENGINEER, roles=[])
+        self.assertEqual(hub()["access"]["rules"], [])
+        self.network("set_access_control", enabled=0)
+        self.assertFalse(hub()["access"]["restricted"])
 
     def test_hub_owner_must_keep_role_and_enablement(self):
         for change in ("enabled", "roles"):

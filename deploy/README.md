@@ -56,6 +56,7 @@ Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.
 | Free an address | **Release** a disabled peer after the hub has applied the removal. |
 | Rotate a key | **Rotate Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
 | Rotate a host token | Change the user's API secret and `token` in `host.json`. |
+| Control access | On a service, **Access**: add role names and optional ports. Network > **Access Roles**: grant them to users. Network > **Turn On Access Control**. |
 
 Agent errors print a `stage` without details. Read them in the unit journal. A failed apply is retried on the next run. Stopping the timer keeps the current peers.
 

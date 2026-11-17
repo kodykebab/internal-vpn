@@ -36,7 +36,12 @@ SNAPSHOT = {
     "peers": [
         {"public_key": key(2), "address": "100.100.64.2", "endpoint": None, "allowed_ips": "100.100.64.2/32"}
     ],
-    "access": {"services": ["100.100.64.2"]},
+    "access": {"restricted": False, "services": ["100.100.64.2"], "rules": []},
+}
+ACCESS = {
+    "restricted": True,
+    "services": ["100.100.64.2"],
+    "rules": [{"source": "100.100.64.3", "destination": "100.100.64.2", "ports": "22,8000-8005"}],
 }
 
 
@@ -63,10 +68,16 @@ class UpdateTests(unittest.TestCase):
             lambda d: d["peers"][0].update(public_key=key(0)),
             lambda d: d["peers"][0].update(allowed_ips="100.100.64.0/24"),
             lambda d: d.update(access=None),
-            lambda d: d.update(access={"services": ["10.0.0.1"]}),
-            lambda d: d.update(access={"services": [], "extra": 1}),
+            lambda d: d.update(access={"restricted": False, "services": [], "rules": [], "extra": 1}),
+            lambda d: d.update(access={"restricted": 0, "services": [], "rules": []}),
+            lambda d: d.update(access={"restricted": False, "services": ["10.0.0.1"], "rules": []}),
+            lambda d: d.update(access=dict(ACCESS, restricted=False)),
+            lambda d: d.update(access=dict(ACCESS, rules=[dict(ACCESS["rules"][0], ports="22; drop")])),
+            lambda d: d.update(access=dict(ACCESS, rules=[dict(ACCESS["rules"][0], ports="22,22")])),
+            lambda d: d.update(access=dict(ACCESS, rules=[dict(ACCESS["rules"][0], source="100.100.65.3")])),
         ]
         self.host.validate(SNAPSHOT)
+        self.host.validate(dict(SNAPSHOT, access=ACCESS))
         for mutate in mutations:
             snapshot = deepcopy(SNAPSHOT)
             mutate(snapshot)
@@ -115,26 +126,43 @@ class UpdateTests(unittest.TestCase):
         self.nft = [call.kwargs["input"] for call in execute.call_args_list if call.args[0] == "nft"]
         return [call.args for call in set_peer.call_args_list]
 
-    def test_hub_rules_let_members_reach_servers_but_never_open_devices(self):
+    def test_port_lists_are_merged_and_bounded(self):
+        self.assertEqual(WireGuard.parse_ports(""), "")
+        self.assertEqual(WireGuard.parse_ports(" 443, 22,8003-8010,8000-8005,23"), "22-23,443,8000-8010")
+        for ports in ("0", "65536", "22-21", "ssh", "22;", None):
+            with self.subTest(ports=ports), self.assertRaises((TypeError, ValueError)):
+                WireGuard.parse_ports(ports)
+
+    def test_hub_replaces_access_rules_atomically(self):
         link = 'iifname "ivpn0" oifname "ivpn0"'
+        servers = f"{link} ip daddr {{ 100.100.64.2 }} accept"
+        common = (
+            f"{link} ct state established,related accept",
+            f"{link} ip saddr {{ 100.100.64.2 }} ip daddr {{ 100.100.64.2 }} accept",
+            f"{link} counter drop",
+        )
         self.apply()
         (script,) = self.nft
         self.assertTrue(
             script.startswith("table inet internal_vpn_access\ndelete table inet internal_vpn_access\n")
         )
+        for line in (*common, servers):
+            self.assertIn(line, script)
+        self.apply(snapshot=dict(SNAPSHOT, access=ACCESS))
+        (script,) = self.nft
         for line in (
-            f"{link} ct state established,related accept",
-            f"{link} ip saddr {{ 100.100.64.2 }} ip daddr {{ 100.100.64.2 }} accept",
-            f"{link} ip daddr {{ 100.100.64.2 }} accept",
-            f"{link} counter drop",
+            *common,
+            "ip saddr 100.100.64.3 ip daddr 100.100.64.2 tcp dport { 22, 8000-8005 } accept",
+            "ip saddr 100.100.64.3 ip daddr 100.100.64.2 udp dport { 22, 8000-8005 } accept",
         ):
             self.assertIn(line, script)
+        self.assertNotIn(servers, script)
         spoke = Host(dict(CONFIG, topology="spoke", address="100.100.64.2", public_key=key(2)))
         hub = {"public_key": key(1), "address": "100.100.64.1", "endpoint": "192.0.2.1:51820"}
-        spoke_snapshot = dict(
-            SNAPSHOT, topology="spoke", access=None, peers=[dict(hub, allowed_ips="100.100.64.0/24")]
+        self.apply(
+            host=spoke,
+            snapshot=dict(SNAPSHOT, topology="spoke", peers=[dict(hub, allowed_ips="100.100.64.0/24")]),
         )
-        self.apply(host=spoke, snapshot=spoke_snapshot)
         self.assertEqual(self.nft, [])
 
     def test_removal_precedes_updates_and_private_key_is_untouched(self):

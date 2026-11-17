@@ -8,6 +8,7 @@
     "subnet",
     "revision",
     "hub",
+    "access_control",
     "hub_digest",
     "hub_alert"
   ],
@@ -30,6 +31,13 @@
       "fieldtype": "Link",
       "options": "VPN Peer",
       "read_only": 1
+    },
+    {
+      "fieldname": "access_control",
+      "label": "Access Control",
+      "fieldtype": "Check",
+      "read_only": 1,
+      "description": "When on, engineer devices reach only services their access roles allow"
     },
     {
       "fieldname": "hub_digest",

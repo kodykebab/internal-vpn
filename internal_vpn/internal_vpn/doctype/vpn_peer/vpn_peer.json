@@ -12,6 +12,7 @@
     "address",
     "endpoint",
     "enabled",
+    "access",
     "reported_revision",
     "apply_success",
     "reported_at",
@@ -69,6 +70,14 @@
       "fieldtype": "Check",
       "default": 1,
       "read_only": 1
+    },
+    {
+      "fieldname": "access",
+      "label": "Access",
+      "fieldtype": "Table",
+      "options": "VPN Access",
+      "read_only": 1,
+      "depends_on": "eval:doc.kind=='Service'"
     },
     {
       "fieldname": "reported_revision",
