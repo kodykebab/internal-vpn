@@ -1,4 +1,6 @@
-# Template: set the interface and subnet for the host, and merge into the existing firewall.
+# Template: set the interface and subnet. Loading it again resets both tables.
+table inet internal_vpn
+delete table inet internal_vpn
 table inet internal_vpn {
     # The hub only routes. VPN members may ping it but reach no hub service.
     chain input {
@@ -13,5 +15,16 @@ table inet internal_vpn {
         iifname "ivpn0" oifname "ivpn0" ip saddr 100.100.64.0/24 ip daddr 100.100.64.0/24 accept
         iifname "ivpn0" counter drop
         oifname "ivpn0" counter drop
+    }
+}
+
+# Closed until the agent's first run replaces it with current rules.
+table inet internal_vpn_access
+delete table inet internal_vpn_access
+table inet internal_vpn_access {
+    chain forward {
+        type filter hook forward priority 10; policy accept;
+        iifname "ivpn0" oifname "ivpn0" ct state established,related accept
+        iifname "ivpn0" oifname "ivpn0" counter drop
     }
 }

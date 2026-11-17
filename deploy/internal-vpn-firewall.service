@@ -1,0 +1,12 @@
+[Unit]
+Description=Load the internal VPN hub firewall
+Before=wg-quick@ivpn0.service internal-vpn-update.service
+After=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/internal-vpn/hub.nft
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,7 @@ Host provisioning owns `ivpn0`, its private key, address and firewall. This guid
 
 - Root, Python 3.10+ and `wg`. Run the agent in the host's own network namespace.
 - `ivpn0` with a key generated on the host and the address from registration.
-- Hub only: IPv4 forwarding on, redirects off, no NAT, and [hub.nft](hub.nft) loaded. It blocks hub services from members.
+- Hub only: no NAT. [Start at boot](#start-at-boot) sets forwarding, redirects and the firewall.
 - HTTPS to the VPN app that does not go through the tunnel.
 
 ## Install
@@ -39,6 +39,33 @@ Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 Run the same `host.py` version as the app on every host. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
 
 Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn`, mode `0440`, with the bench user. Check it with `visudo -cf`. It lets Frappe start the updater right after a change; otherwise the timer catches up. Grant nothing else, and keep the agent files root-owned.
+
+## Start at boot
+
+On every host, `/etc/wireguard/ivpn0.conf`, root, mode `0600`:
+
+```ini
+[Interface]
+PrivateKey = <key generated on this host>
+Address = <address from registration>/<subnet prefix>
+ListenPort = 51820
+```
+
+Keep `ListenPort` on the hub only. Leave out `[Peer]` sections: the agent manages peers. Enable it with `sudo systemctl enable --now wg-quick@ivpn0`.
+
+On the hub, set the interface and subnet in [hub.nft](hub.nft), then:
+
+```sh
+printf 'net.ipv4.ip_forward=1\nnet.ipv4.conf.all.send_redirects=0\n' | sudo tee /etc/sysctl.d/90-internal-vpn.conf
+sudo sysctl --system
+sudo install -d -m 0700 /etc/internal-vpn
+sudo install -m 0600 deploy/hub.nft /etc/internal-vpn/hub.nft
+sudo install -m 0644 deploy/internal-vpn-firewall.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now internal-vpn-firewall.service
+```
+
+The firewall loads before `ivpn0` and the agent. It blocks hub services from members and starts closed: members reach nothing new until the agent's first run sets current rules. Loading it again resets it.
 
 ## Bring up
 
