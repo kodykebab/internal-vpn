@@ -1,27 +1,19 @@
-# Host operations
+# Host guide
 
-The host's existing provisioning owns the interface, private key, address, route and firewall. These steps install only the agent.
+Host provisioning owns `ivpn0`, its private key, address and firewall. This guide installs the agent and runs the network.
+
+## Decide at deployment
+
+- **Hub endpoint:** `203.0.113.10:51820` or `[2001:db8::1]:51820`. Engineers on IPv4-only networks cannot reach an IPv6-only hub.
+- **Subnet:** inside `100.64.0.0/10`. It cannot change later.
+- **Spokes:** which servers join, and which ports each opens on `ivpn0`. Every member can reach every spoke.
 
 ## Prerequisites
 
-- Python 3.10 or later and `wg` for root.
-- A dedicated `ivpn0` interface with a locally generated key and the address from `register_service`.
-- Run the agent in the host network namespace.
-- On the hub: IPv4 forwarding, redirects off and [hub.nft](hub.nft) merged into the firewall. It blocks hub services from VPN members. Do not NAT VPN traffic.
-- HTTPS access to the VPN app that does not depend on the tunnel.
-
-## Configuration
-
-`/etc/internal-vpn/host.json`, owned by root, mode `0600`:
-
-| Field | Value |
-| --- | --- |
-| `name` | `VPN Peer` name |
-| `address`, `subnet`, `public_key` | Allocated peer address, network subnet and locally generated public key |
-| `interface` | `ivpn0` |
-| `topology` | `hub` or `spoke` |
-| `hub_public_key` | Pinned hub key (spokes) |
-| `url`, `token`, `ca_file` | App URL, `api_key:api_secret` of the host user, optional CA bundle |
+- Root, Python 3.10+ and `wg`. Run the agent in the host's own network namespace.
+- `ivpn0` with a key generated on the host and the address from registration.
+- Hub only: IPv4 forwarding on, redirects off, no NAT, and [hub.nft](hub.nft) loaded. It blocks hub services from members.
+- HTTPS to the VPN app that does not go through the tunnel.
 
 ## Install
 
@@ -33,43 +25,66 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now internal-vpn-update.timer
 ```
 
-The timer runs the agent 15 seconds after each run ends. The agent keeps its revision watermark in `/var/lib/internal-vpn`. Keep that directory: it rejects stale or conflicting snapshots. Do not delete it to clear a rejection.
+Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 
-On the hub, install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn` with mode `0440`, replacing `frappe` with the bench OS user. Validate it with `visudo -cf` before installation. Keep the unit, `/opt/internal-vpn`, its script and `/etc/internal-vpn` owned by root and unwritable by the bench user. Do not grant sudo access to Python or arbitrary `wg` commands.
+| Field | Value |
+| --- | --- |
+| `name` | VPN Peer name |
+| `address`, `subnet`, `public_key` | From registration |
+| `interface` | `ivpn0` |
+| `topology` | `hub` or `spoke` |
+| `hub_public_key` | Hub key, spokes only |
+| `url`, `token`, `ca_file` | App URL, the host user's `api_key:api_secret`, optional CA file |
 
-Frappe starts the hub updater after membership commits using `sudo -n /usr/bin/systemctl start --no-block internal-vpn-update.service`. A failed start goes to `logs/internal_vpn.log`; the timer retries current membership. Provision the hub and its dedicated host credential before selecting it in Desk.
+The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
+
+Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn`, mode `0440`, with the bench user. Check it with `visudo -cf`. It lets Frappe start the updater right after a change; otherwise the timer catches up. Grant nothing else, and keep the agent files root-owned.
+
+## Bring up
+
+1. Initialize the subnet.
+2. Register the hub service with its endpoint, set up its host, then **Set Hub**.
+3. Register each spoke service and set up its host.
 
 ## Operate
 
 | Task | Steps |
 | --- | --- |
-| Enroll a device | Administrator invites the engineer with `VPN Engineer`. Manager registers their public key, or the approved engineer registers it after login. The engineer copies Configuration in Desk. |
-| Enroll a service | Manager runs `register_service`, provisions `ivpn0` and `host.json`, then starts the timer. |
-| Disable a device | `set_enabled(0)`, then confirm `hub_current` in `get_status`. An eligible engineer can re-enable their device or register another. |
-| Revoke a user | Disable the User, or remove their `VPN Engineer` / `VPN Host` role, then confirm `hub_current`. The hub account must remain eligible. |
-| Free an address | After the removal, `release` the disabled peer. It fails until the hub has applied the removal. Frappe keeps the record in Deleted Document. |
-| Rotate a key | `rotate_key`, then install the new private key on `ivpn0` through provisioning and set `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
-| Rotate a host credential | Change the user's API secret, then update `token` in `host.json`. Membership does not change. |
+| Add an engineer | Manager: **Add Engineer**, then hand over the initial password. Engineer: log in, **Register Device**, import the configuration. |
+| Disable a device | **Disable**. Status shows the hub Current once applied. |
+| Revoke a user | Disable the user or remove their VPN role. |
+| Free an address | **Release** a disabled peer after the hub has applied the removal. |
+| Rotate a key | **Rotate Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
+| Rotate a host token | Change the user's API secret and `token` in `host.json`. |
 
-Agent errors include a safe `stage` (configuration, state, fetch, validation, apply, report or measurement); exception details and credentials are omitted. Check the JSON in the unit journal.
+Agent errors print a `stage` without details. Read them in the unit journal. A failed apply is retried on the next run. Stopping the timer keeps the current peers.
 
-A failed apply is not rolled back. The next run applies current membership. Stopping the timer does not remove peers.
+## Optional settings
+
+All are off by default.
+
+| Setting | Turn on |
+| --- | --- |
+| Email invites | `bench --site <site> set-config internal_vpn_invite_email 1`, plus outgoing email |
+| Two-factor login | System Settings > Enable Two Factor Auth |
+| Backups | Schedule site backups. Keep each host's `/var/lib/internal-vpn` |
+| Hub alerts | `bench --site <site> set-config internal_vpn_hub_alert_minutes 10`, scheduler on. Managers get one notification per outage and one on recovery |
 
 ## Database recovery
 
-1. Stop and runtime-mask the updater service and timer on every host and pause membership changes. Isolate VPN traffic while reconciling the restored database; its membership may predate revocations.
-2. Keep each host's `/var/lib/internal-vpn/revision.json`. Record the highest revision across all hosts and the restored network. If any watermark is unavailable, keep that host isolated until it is explicitly reprovisioned.
-3. Reconcile owners, keys, enablement and released addresses against Frappe's Version history and your incident records. Use VPN actions; do not restore released peers through Deleted Document. Reapply any revocations missing from the backup.
-4. Unmask the hub updater. In `bench --site <site> console`, set the network revision above the recorded maximum using the existing controller, then commit:
+1. Stop the updater on every host and pause changes. Keep VPN traffic isolated: the backup may miss revocations.
+2. Note the highest revision in any host's `/var/lib/internal-vpn/revision.json`. Keep hosts without one isolated until reprovisioned.
+3. Fix owners, keys and enablement with VPN actions. Reapply missing revocations. Do not restore released peers from Deleted Document.
+4. Raise the revision above that maximum in `bench --site <site> console`:
 
-```python
-network = frappe.get_doc("VPN Network", "default").lock()
-network.revision = max(network.revision, highest_observed_revision)
-network.advance_revision()
-frappe.db.commit()
-```
+    ```python
+    network = frappe.get_doc("VPN Network", "default").lock()
+    network.revision = max(network.revision, highest_observed_revision)
+    network.advance_revision()
+    frappe.db.commit()
+    ```
 
-The commit wakes the hub updater. After reconciliation, unmask and run the updater on each host, confirm fresh successful reports and test VPN reachability before restoring traffic and timers. Do not erase watermarks or lower revisions. Reprovision identity changes explicitly.
+5. Start the updaters, confirm fresh reports and reachability, then restore traffic. Never delete watermarks or lower revisions.
 
 ## Measure
 
@@ -77,4 +92,4 @@ The commit wakes the hub updater. After reconciliation, unmask and run the updat
 sudo python3 /opt/internal-vpn/host.py measure --config /etc/internal-vpn/host.json --probe 100.100.64.1 --unit internal-vpn-update.service
 ```
 
-The output is JSON: per-peer handshake age and byte counters, optional ping results and the agent's last systemd result. It never reads private keys. A handshake or ping does not prove that an application is healthy.
+Prints handshake age, byte counters, ping results and the updater's last result. It reads no private keys.
