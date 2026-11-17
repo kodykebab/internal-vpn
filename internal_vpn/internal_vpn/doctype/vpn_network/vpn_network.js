@@ -156,16 +156,21 @@ class VPNNetworkForm {
 	}
 
 	show_status(status) {
+		// A stale report outranks the applied state: the host may have stopped running.
+		const state = (host) =>
+			host.stale
+				? ["red", __("Stale")]
+				: host.current
+					? ["green", __("Current")]
+					: host.reported_at && !host.apply_success
+						? ["red", __("Failed")]
+						: ["orange", __("Pending")];
 		const rows = status.hosts.map(
 			(host) => `<tr>
 			<td>${frappe.utils.get_form_link("VPN Peer", host.name, true, frappe.utils.escape_html(host.address))}</td>
 			<td>${frappe.utils.escape_html(host.user)}</td>
 			<td>${host.required ? __("Yes") : __("No")}</td>
-			<td><span class="indicator-pill ${
-				host.current ? "green" : host.reported_at && !host.apply_success ? "red" : "orange"
-			}">${
-				host.current ? __("Current") : host.reported_at && !host.apply_success ? __("Failed") : __("Pending")
-			}</span></td>
+			<td><span class="indicator-pill ${state(host)[0]}">${state(host)[1]}</span></td>
 			<td>${host.reported_revision ?? ""}</td>
 			<td>${host.reported_at ? frappe.datetime.comment_when(host.reported_at) : ""}</td>
 		</tr>`

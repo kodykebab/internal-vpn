@@ -290,6 +290,7 @@ class VPNNetwork(Document):
             return status
 
         hub, members = self.get_membership()
+        deadline = self.report_deadline()
         for peer in self.get_peers():
             if peer.kind != "Service":
                 continue
@@ -304,20 +305,28 @@ class VPNNetwork(Document):
                     "reported_at": peer.reported_at,
                     "required": peer.name in members,
                     "current": self.is_current(peer, hub, members),
+                    "stale": bool(peer.reported_at and peer.reported_at < deadline),
                 }
             )
         status["hub_current"] = next(host["current"] for host in status["hosts"] if host["name"] == self.hub)
-        status["all_current"] = all(host["current"] for host in status["hosts"] if host["required"])
+        status["all_current"] = all(
+            host["current"] and not host["stale"] for host in status["hosts"] if host["required"]
+        )
         return status
+
+    @staticmethod
+    def report_deadline():
+        """Reports older than this are stale: the alert threshold, or 5 minutes when alerts are off."""
+        minutes = cint(frappe.conf.get("internal_vpn_hub_alert_minutes")) or 5
+        return add_to_date(now_datetime(), minutes=-minutes)
 
     def check_hub(self):
         """Notify VPN Managers once when the hub stops reporting or lags membership, and once on recovery."""
-        minutes = cint(frappe.conf.get("internal_vpn_hub_alert_minutes"))
-        if not minutes or not self.hub:
+        if not cint(frappe.conf.get("internal_vpn_hub_alert_minutes")) or not self.hub:
             return
         status = self.get_status()
         hub = next(host for host in status["hosts"] if host["name"] == self.hub)
-        since = add_to_date(now_datetime(), minutes=-minutes)
+        since = self.report_deadline()
         problem = None
         if (hub["reported_at"] or self.modified) < since:
             problem = "The VPN hub has stopped reporting"

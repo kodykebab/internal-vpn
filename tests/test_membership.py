@@ -592,6 +592,22 @@ class MembershipTests(unittest.TestCase):
                 )
                 self.assertEqual(check()[-1], "The VPN hub has not applied the latest membership")
 
+    def test_status_marks_hosts_stale_and_accepts_ipv6_hub_endpoint(self):
+        self.peer(self.hub["name"], "set_endpoint", endpoint="[2001:DB8::1]:51820")
+        self.assertEqual(frappe.db.get_value("VPN Peer", self.hub["name"], "endpoint"), "[2001:db8::1]:51820")
+        self.report_hub()
+        frappe.set_user(MANAGER)
+        status = frappe.get_doc("VPN Network", "default").get_status()
+        self.assertTrue(status["all_current"])
+        later = add_to_date(now_datetime(), minutes=10)
+        with patch(
+            "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.now_datetime", return_value=later
+        ):
+            status = frappe.get_doc("VPN Network", "default").get_status()
+        hub = next(host for host in status["hosts"] if host["name"] == self.hub["name"])
+        self.assertTrue(hub["current"] and hub["stale"])
+        self.assertFalse(status["all_current"])
+
     def test_hub_owner_must_keep_role_and_enablement(self):
         for change in ("enabled", "roles"):
             frappe.set_user("Administrator")
