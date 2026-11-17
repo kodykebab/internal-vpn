@@ -16,6 +16,7 @@ class VPNNetworkForm {
 		frm.set_intro("");
 		if (!frm.doc.subnet) frm.set_intro(__("Initialize the subnet before registering peers."), "orange");
 		else if (!frm.doc.hub) frm.set_intro(__("Set the hub before hosts and devices can connect."), "orange");
+		if (frm.doc.hub_alert) frm.set_intro(__(frm.doc.hub_alert), "red");
 
 		if (frappe.user.has_role("VPN Engineer")) {
 			frm.add_custom_button(__("Register Device"), () => this.register_device());

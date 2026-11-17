@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import frappe
 import frappe.app
 from frappe.handler import run_doc_method
+from frappe.utils import add_to_date, now_datetime
 from frappe.utils.password import check_password
 from test_host import key
 from werkzeug.test import Client
@@ -69,7 +70,9 @@ class MembershipTests(unittest.TestCase):
         frappe.set_user("Administrator")
         frappe.db.rollback()
         frappe.db.delete("VPN Peer")
-        frappe.db.set_value("VPN Network", "default", {"hub": None, "subnet": None, "revision": 0})
+        frappe.db.set_value(
+            "VPN Network", "default", {"hub": None, "subnet": None, "revision": 0, "hub_alert": None}
+        )
         for email in (ENGINEER, OTHER, HUB, SPOKE):
             user = frappe.get_doc("User", email)
             user.enabled = 1
@@ -560,6 +563,34 @@ class MembershipTests(unittest.TestCase):
             watermark = Path(directory) / "revision.json"
             Host.accept_revision(watermark, first["revision"], WireGuard.digest(first))
             Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
+
+    def test_hub_alerts_notify_once_per_problem_and_on_recovery(self):
+        module = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network"
+
+        def check(at=None):
+            frappe.set_user("Administrator")  # as the scheduler runs jobs
+            with patch(f"{module}.now_datetime", return_value=at or now_datetime()):
+                frappe.get_doc("VPN Network", "default").check_hub()
+            return [call.args[1]["subject"] for call in notify.call_args_list]
+
+        with patch(f"{module}.enqueue_create_notification") as notify:
+            self.assertEqual(check(add_to_date(now_datetime(), minutes=10)), [])
+            with patch.dict(frappe.conf, {"internal_vpn_hub_alert_minutes": 5}):
+                later = add_to_date(now_datetime(), minutes=10)
+                self.assertEqual(check(later), ["The VPN hub has stopped reporting"])
+                self.assertEqual(len(check(later)), 1)
+                self.assertIn(MANAGER, notify.call_args.args[0])
+                self.report_hub()
+                self.assertEqual(check()[-1], "Resolved: The VPN hub has stopped reporting")
+                self.device()
+                frappe.db.set_value(
+                    "VPN Network",
+                    "default",
+                    "modified",
+                    add_to_date(now_datetime(), minutes=-10),
+                    update_modified=False,
+                )
+                self.assertEqual(check()[-1], "The VPN hub has not applied the latest membership")
 
     def test_hub_owner_must_keep_role_and_enablement(self):
         for change in ("enabled", "roles"):

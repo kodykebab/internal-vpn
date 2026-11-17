@@ -1,7 +1,9 @@
 import subprocess
 
 import frappe
+from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
 from frappe.model.document import Document
+from frappe.utils import add_to_date, cint, now_datetime
 
 from internal_vpn.host import MAX_PEERS, WireGuard
 
@@ -308,6 +310,30 @@ class VPNNetwork(Document):
         status["all_current"] = all(host["current"] for host in status["hosts"] if host["required"])
         return status
 
+    def check_hub(self):
+        """Notify VPN Managers once when the hub stops reporting or lags membership, and once on recovery."""
+        minutes = cint(frappe.conf.get("internal_vpn_hub_alert_minutes"))
+        if not minutes or not self.hub:
+            return
+        status = self.get_status()
+        hub = next(host for host in status["hosts"] if host["name"] == self.hub)
+        since = add_to_date(now_datetime(), minutes=-minutes)
+        problem = None
+        if (hub["reported_at"] or self.modified) < since:
+            problem = "The VPN hub has stopped reporting"
+        elif not status["hub_current"] and self.modified < since:
+            problem = "The VPN hub has not applied the latest membership"
+        if (problem or "") == (self.hub_alert or ""):
+            return
+        subject = problem or f"Resolved: {self.hub_alert}"
+        self.db_set("hub_alert", problem, update_modified=False)
+        frappe.logger("internal_vpn", allow_site=True).warning(subject)
+        managers = frappe.get_all("Has Role", {"role": "VPN Manager", "parenttype": "User"}, pluck="parent")
+        enqueue_create_notification(
+            managers,
+            {"type": "Alert", "document_type": self.doctype, "document_name": self.name, "subject": subject},
+        )
+
     def on_user_change(self, user, method: str):
         """Track owner eligibility changes; keep the hub eligible."""
         relevant = set(ROLE_FOR_KIND.values())
@@ -332,6 +358,10 @@ class VPNNetwork(Document):
 
 def has_desk_access():
     return frappe.has_permission("VPN Network", "read")
+
+
+def check_hub():
+    frappe.get_doc("VPN Network", "default").check_hub()
 
 
 def on_user_change(user, method=None):

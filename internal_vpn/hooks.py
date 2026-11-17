@@ -23,6 +23,9 @@ doc_events = {
         "on_trash": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.on_user_change",
     }
 }
+scheduler_events = {
+    "cron": {"*/5 * * * *": ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.check_hub"]}
+}
 has_permission = {"VPN Peer": "internal_vpn.internal_vpn.doctype.vpn_peer.vpn_peer.has_permission"}
 permission_query_conditions = {
     "VPN Peer": "internal_vpn.internal_vpn.doctype.vpn_peer.vpn_peer.get_permission_query_conditions"

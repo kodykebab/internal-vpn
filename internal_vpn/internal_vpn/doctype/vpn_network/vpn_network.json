@@ -8,7 +8,8 @@
     "subnet",
     "revision",
     "hub",
-    "hub_digest"
+    "hub_digest",
+    "hub_alert"
   ],
   "fields": [
     {
@@ -33,6 +34,13 @@
     {
       "fieldname": "hub_digest",
       "label": "Hub Digest",
+      "fieldtype": "Data",
+      "read_only": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "hub_alert",
+      "label": "Hub Alert",
       "fieldtype": "Data",
       "read_only": 1,
       "hidden": 1
