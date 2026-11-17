@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import frappe
 import frappe.app
 from frappe.handler import run_doc_method
+from frappe.utils.password import check_password
 from test_host import key
 from werkzeug.test import Client
 from werkzeug.wrappers import Request, Response
@@ -76,7 +77,9 @@ class MembershipTests(unittest.TestCase):
             user.save()
         frappe.db.commit()
         self.network("initialize", subnet="100.100.64.0/24")
-        self.hub = self.network("register_service", user=HUB, public_key=key(1), endpoint="192.0.2.1:51820")
+        self.hub = self.network(
+            "register_service", user=HUB, label="service", public_key=key(1), endpoint="192.0.2.1:51820"
+        )
         self.network("set_hub", peer=self.hub["name"])
         self.wakeup.reset_mock()
 
@@ -106,7 +109,7 @@ class MembershipTests(unittest.TestCase):
         return self.call(actor, "VPN Peer", name, method, **args)
 
     def device(self, public_key=None, actor=ENGINEER):
-        return self.network("register_device", actor=actor, public_key=public_key or key(3))
+        return self.network("register_device", actor=actor, public_key=public_key or key(3), label="laptop")
 
     def report_hub(self):
         snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
@@ -139,7 +142,9 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
 
     def test_only_the_hub_endpoint_can_change(self):
-        service = self.network("register_service", user=SPOKE, public_key=key(2), endpoint="192.0.2.2:51820")
+        service = self.network(
+            "register_service", user=SPOKE, label="service", public_key=key(2), endpoint="192.0.2.2:51820"
+        )
         device = self.device()
         revision = frappe.db.get_value("VPN Network", "default", "revision")
         for name in (service["name"], device["name"]):
@@ -150,19 +155,39 @@ class MembershipTests(unittest.TestCase):
             self.peer(self.hub["name"], "set_endpoint", endpoint="192.0.2.9:51820")["revision"], revision + 1
         )
 
-    def test_manager_can_enroll_for_an_approved_engineer(self):
-        device = self.network("register_device", user=ENGINEER, public_key=key(3))
-        snapshot = self.peer(device["name"], "get_configuration", actor=ENGINEER)
-        self.assertEqual(snapshot["public_key"], key(3))
+    def test_engineers_register_only_their_own_named_devices(self):
         with self.assertRaises(frappe.PermissionError):
-            self.network("register_device", actor=OTHER, user=ENGINEER, public_key=key(4))
+            self.network("register_device", public_key=key(3), label="laptop")
+        with self.assertRaises(TypeError):
+            self.network("register_device", actor=OTHER, user=ENGINEER, public_key=key(3), label="laptop")
+        device = self.network("register_device", actor=OTHER, public_key=key(3), label="laptop")
+        self.assertEqual(
+            frappe.db.get_value("VPN Peer", device["name"], ["user", "label"]), (OTHER, "laptop")
+        )
         with self.assertRaises(frappe.ValidationError):
-            self.network("register_device", user=SPOKE, public_key=key(4))
+            self.network("register_device", actor=ENGINEER, public_key=key(4), label=" ")
+
+    def test_managers_add_engineers(self):
+        email = f"vpn-added-{frappe.generate_hash(length=8)}@example.test"
+        with self.assertRaises(frappe.PermissionError):
+            self.network("add_engineer", actor=ENGINEER, email=email, first_name="Added")
+        added = self.network("add_engineer", email=email, first_name="Added")
+        self.assertEqual(check_password(email, added["password"]), email)
+        self.assertIn("VPN Engineer", frappe.get_roles(email))
+        self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
+        self.assertTrue(
+            self.network("register_device", actor=email, public_key=key(4), label="laptop")["name"]
+        )
+        self.assertIsNone(self.network("add_engineer", email=HUB)["password"])
+        self.assertTrue({"VPN Host", "VPN Engineer"} <= set(frappe.get_roles(HUB)))
+        with patch.dict(frappe.conf, {"internal_vpn_invite_email": 1}):
+            emailed = f"vpn-emailed-{frappe.generate_hash(length=8)}@example.test"
+            self.assertIsNone(self.network("add_engineer", email=emailed, first_name="Emailed")["password"])
 
     def test_hub_wakeup_waits_for_commit_and_is_discarded_on_rollback(self):
         for commit in (False, True):
             frappe.set_user(ENGINEER)
-            frappe.get_doc("VPN Network", "default").register_device(key(3))
+            frappe.get_doc("VPN Network", "default").register_device(key(3), "laptop")
             self.wakeup.assert_not_called()
             if commit:
                 frappe.db.commit()
@@ -308,7 +333,7 @@ class MembershipTests(unittest.TestCase):
         self.assertTrue(self.network("get_status")["hub_current"])
 
     def test_spoke_lookup_is_bounded_and_matches_full_snapshot(self):
-        service = self.network("register_service", user=SPOKE, public_key=key(2))
+        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
         self.device()
         network = frappe.get_doc("VPN Network", "default").lock()
         peer = frappe.get_doc("VPN Peer", service["name"])
@@ -344,7 +369,7 @@ class MembershipTests(unittest.TestCase):
         self.assertTrue(self.network("get_status")["hub_current"])
 
     def test_polling_and_revocation_leave_consistent_snapshots(self):
-        service = self.network("register_service", user=SPOKE, public_key=key(2))
+        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
         device = self.device()
         barrier = Barrier(3)
 
@@ -382,7 +407,7 @@ class MembershipTests(unittest.TestCase):
             frappe.db.rollback()
 
     def test_service_credentials_are_scoped_and_cannot_edit_membership(self):
-        service = self.network("register_service", user=SPOKE, public_key=key(2))
+        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
         snapshot = self.peer(service["name"], "get_configuration", actor=SPOKE)
         self.assertEqual(snapshot["topology"], "spoke")
         with self.assertRaises(frappe.PermissionError):
@@ -390,7 +415,7 @@ class MembershipTests(unittest.TestCase):
         with self.assertRaises(frappe.PermissionError):
             self.peer(service["name"], "rotate_key", actor=SPOKE, public_key=key(4))
         with self.assertRaises(frappe.ValidationError):
-            self.network("register_service", user=SPOKE, public_key=key(4))
+            self.network("register_service", user=SPOKE, label="service", public_key=key(4))
 
     def test_duplicate_key_rolls_back_membership(self):
         device = self.device()

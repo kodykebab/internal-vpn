@@ -5,6 +5,7 @@
   "autoname": "hash",
   "engine": "InnoDB",
   "field_order": [
+    "label",
     "kind",
     "user",
     "public_key",
@@ -17,6 +18,13 @@
     "reported_digest"
   ],
   "fields": [
+    {
+      "fieldname": "label",
+      "label": "Name",
+      "fieldtype": "Data",
+      "in_list_view": 1,
+      "read_only": 1
+    },
     {
       "fieldname": "kind",
       "label": "Kind",
@@ -105,8 +113,8 @@
       "read": 1
     }
   ],
-  "title_field": "address",
+  "title_field": "label",
   "show_title_field_in_link": 1,
-  "search_fields": "address,user",
+  "search_fields": "label,address,user",
   "track_changes": 1
 }

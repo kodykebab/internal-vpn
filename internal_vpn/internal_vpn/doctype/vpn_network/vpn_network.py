@@ -166,7 +166,12 @@ class VPNNetwork(Document):
             "peers": peers,
         }
 
-    def add_peer(self, kind: str, user: str, public_key: str, endpoint: str | None = None) -> dict:
+    def add_peer(
+        self, kind: str, user: str, public_key: str, label: str, endpoint: str | None = None
+    ) -> dict:
+        label = (label or "").strip()
+        if not label:
+            frappe.throw("Name the peer")
         self.lock()
         if not self.subnet:
             frappe.throw("Initialize the subnet first")
@@ -189,6 +194,7 @@ class VPNNetwork(Document):
             {
                 "doctype": "VPN Peer",
                 "kind": kind,
+                "label": label,
                 "user": user,
                 "public_key": public_key,
                 "endpoint": endpoint,
@@ -214,18 +220,38 @@ class VPNNetwork(Document):
         return {"subnet": subnet}
 
     @frappe.whitelist(methods=["POST"])
-    def register_service(self, user, public_key, endpoint=None):
+    def register_service(self, user, public_key, label, endpoint=None):
         frappe.only_for("VPN Manager")
-        return self.add_peer("Service", user, public_key, endpoint)
+        return self.add_peer("Service", user, public_key, label, endpoint)
 
     @frappe.whitelist(methods=["POST"])
-    def register_device(self, public_key, user=None):
-        user = user or frappe.session.user
-        if user != frappe.session.user:
-            frappe.only_for("VPN Manager")
+    def add_engineer(self, email, first_name=None):
+        """Give a user the engineer role. A new user gets an initial password for the operator to hand
+        over, or Frappe's email link when `internal_vpn_invite_email` is set."""
+        frappe.only_for("VPN Manager")
+        password = None
+        if frappe.db.exists("User", email):
+            user = frappe.get_doc("User", email)
         else:
-            frappe.only_for("VPN Engineer")
-        return self.add_peer("Device", user, public_key)
+            by_email = bool(frappe.conf.get("internal_vpn_invite_email"))
+            password = None if by_email else frappe.generate_hash(length=24)
+            user = frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": email,
+                    "first_name": first_name or email.split("@")[0],
+                    "send_welcome_email": int(by_email),
+                    "new_password": password,
+                }
+            )
+        user.flags.ignore_permissions = True
+        user.add_roles(ROLE_FOR_KIND["Device"])
+        return {"user": user.name, "password": password}
+
+    @frappe.whitelist(methods=["POST"])
+    def register_device(self, public_key, label):
+        frappe.only_for(ROLE_FOR_KIND["Device"])
+        return self.add_peer("Device", frappe.session.user, public_key, label)
 
     @frappe.whitelist(methods=["POST"])
     def set_hub(self, peer):

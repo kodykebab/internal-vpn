@@ -20,10 +20,13 @@ class VPNPeerForm {
 		const device_owner = frm.doc.user === frappe.session.user && frm.doc.kind === "Device";
 		const manager = frappe.user.has_role("VPN Manager");
 		frm.set_intro(frm.doc.enabled ? "" : __("Disabled. Release it after the hub applies removal."), "orange");
-		if (device_owner)
-			frm.add_custom_button(__("Configuration"), () =>
-				this.call("get_configuration", {}, (snapshot) => this.show_configuration(snapshot), "GET")
-			);
+		if (device_owner) {
+			frm.add_custom_button(__("Configuration"), () => this.configuration());
+			if (frappe.flags.vpn_show_configuration === frm.doc.name) {
+				frappe.flags.vpn_show_configuration = null;
+				this.configuration();
+			}
+		}
 		if (!manager && !device_owner) return;
 
 		frm.add_custom_button(
@@ -50,15 +53,19 @@ class VPNPeerForm {
 		});
 	}
 
+	configuration() {
+		this.call("get_configuration", {}, (snapshot) => this.show_configuration(snapshot), "GET");
+	}
+
 	set_enabled() {
 		if (!this.frm.doc.enabled) return this.call("set_enabled", { enabled: 1 });
-		frappe.confirm(__("Disable {0}? Access ends when the hub applies the change.", [this.frm.doc.name]), () =>
+		frappe.confirm(__("Disable {0}? Access ends when the hub applies the change.", [this.frm.doc.label || this.frm.doc.name]), () =>
 			this.call("set_enabled", { enabled: 0 })
 		);
 	}
 
 	release() {
-		frappe.confirm(__("Delete {0} and free {1}?", [this.frm.doc.name, this.frm.doc.address]), () =>
+		frappe.confirm(__("Delete {0} and free {1}?", [this.frm.doc.label || this.frm.doc.name, this.frm.doc.address]), () =>
 			this.call("release", {}, () => frappe.set_route("List", "VPN Peer"))
 		);
 	}
@@ -88,7 +95,7 @@ class VPNPeerForm {
 	show_configuration(snapshot) {
 		const lines = [
 			"[Interface]",
-			"PrivateKey = <your private key>",
+			"PrivateKey = <contents of vpn.key>",
 			`Address = ${snapshot.address}/${snapshot.subnet.split("/")[1]}`,
 		];
 		for (const peer of snapshot.peers) {
@@ -110,7 +117,7 @@ class VPNPeerForm {
 					fieldtype: "HTML",
 					options: `<p class="text-muted small">${
 						snapshot.peers.length
-							? __("Replace the placeholder with your private key. Keep it on your device.")
+							? __("Replace the placeholder with the contents of vpn.key, then import this into the WireGuard app.")
 							: __("This device is disabled.")
 					}</p>`,
 				},
