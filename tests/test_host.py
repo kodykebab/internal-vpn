@@ -26,7 +26,7 @@ CONFIG = {
     "token": "never-print-me",
 }
 SNAPSHOT = {
-    "version": 2,
+    "version": 3,
     "revision": 3,
     "topology": "hub",
     "name": "service-1",
@@ -36,6 +36,7 @@ SNAPSHOT = {
     "peers": [
         {"public_key": key(2), "address": "100.100.64.2", "endpoint": None, "allowed_ips": "100.100.64.2/32"}
     ],
+    "access": {"services": ["100.100.64.2"]},
 }
 
 
@@ -61,6 +62,9 @@ class UpdateTests(unittest.TestCase):
             lambda d: d["peers"].append(deepcopy(d["peers"][0])),
             lambda d: d["peers"][0].update(public_key=key(0)),
             lambda d: d["peers"][0].update(allowed_ips="100.100.64.0/24"),
+            lambda d: d.update(access=None),
+            lambda d: d.update(access={"services": ["10.0.0.1"]}),
+            lambda d: d.update(access={"services": [], "extra": 1}),
         ]
         self.host.validate(SNAPSHOT)
         for mutate in mutations:
@@ -105,9 +109,33 @@ class UpdateTests(unittest.TestCase):
         with (
             patch.object(WireGuard, "show", side_effect=[(host or self.host).public_key, *columns]),
             patch.object(WireGuard, "set_peer") as set_peer,
+            patch.object(WireGuard, "execute") as execute,
         ):
             (host or self.host).apply(snapshot)
+        self.nft = [call.kwargs["input"] for call in execute.call_args_list if call.args[0] == "nft"]
         return [call.args for call in set_peer.call_args_list]
+
+    def test_hub_rules_let_members_reach_servers_but_never_open_devices(self):
+        link = 'iifname "ivpn0" oifname "ivpn0"'
+        self.apply()
+        (script,) = self.nft
+        self.assertTrue(
+            script.startswith("table inet internal_vpn_access\ndelete table inet internal_vpn_access\n")
+        )
+        for line in (
+            f"{link} ct state established,related accept",
+            f"{link} ip saddr {{ 100.100.64.2 }} ip daddr {{ 100.100.64.2 }} accept",
+            f"{link} ip daddr {{ 100.100.64.2 }} accept",
+            f"{link} counter drop",
+        ):
+            self.assertIn(line, script)
+        spoke = Host(dict(CONFIG, topology="spoke", address="100.100.64.2", public_key=key(2)))
+        hub = {"public_key": key(1), "address": "100.100.64.1", "endpoint": "192.0.2.1:51820"}
+        spoke_snapshot = dict(
+            SNAPSHOT, topology="spoke", access=None, peers=[dict(hub, allowed_ips="100.100.64.0/24")]
+        )
+        self.apply(host=spoke, snapshot=spoke_snapshot)
+        self.assertEqual(self.nft, [])
 
     def test_removal_precedes_updates_and_private_key_is_untouched(self):
         calls = self.apply((key(3), "100.100.64.3/32", "(none)", "off"))

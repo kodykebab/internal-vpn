@@ -137,7 +137,8 @@ class VPNNetwork(Document):
         frappe.db.commit()
 
     def build_configuration(self, peer, hub, members) -> dict:
-        """Protocol v2 snapshot. The hub lists every member as a /32; a spoke lists only the hub."""
+        """Protocol v3 snapshot. The hub lists every member as a /32, plus the servers for its rules;
+        a spoke lists only the hub."""
 
         def entry(member, endpoint, allowed_ips):
             return {
@@ -158,7 +159,7 @@ class VPNNetwork(Document):
         else:
             peers = [entry(hub, hub.endpoint, self.subnet)]
         return {
-            "version": 2,
+            "version": 3,
             "topology": "hub" if is_hub else "spoke",
             "name": peer.name,
             "revision": self.revision,
@@ -166,6 +167,15 @@ class VPNNetwork(Document):
             "address": peer.address,
             "public_key": peer.public_key,
             "peers": peers,
+            "access": {
+                "services": [
+                    m.address
+                    for _, m in sorted(members.items())
+                    if m.kind == "Service" and m.name != hub.name
+                ]
+            }
+            if is_hub
+            else None,
         }
 
     def add_peer(

@@ -35,6 +35,8 @@ In Desk, **Internal VPN** opens the network. Form buttons call whitelisted DocTy
 
 No role can edit VPN records directly. The network holds one hub and up to 10,000 other peers.
 
+The hub enforces who reaches whom: servers reach each other, members reach servers, and nothing on the VPN can open a connection to a device.
+
 ## Install
 
 1. Create a dedicated site with this app, using Pilot or bench and Python 3.14+.

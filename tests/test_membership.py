@@ -608,6 +608,13 @@ class MembershipTests(unittest.TestCase):
         self.assertTrue(hub["current"] and hub["stale"])
         self.assertFalse(status["all_current"])
 
+    def test_hub_snapshot_lists_servers_and_spokes_get_no_rules(self):
+        service = self.network("register_service", user=SPOKE, public_key=key(2), label="service")
+        self.device()
+        hub = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        self.assertEqual(hub["access"], {"services": [service["address"]]})
+        self.assertIsNone(self.peer(service["name"], "get_configuration", actor=SPOKE)["access"])
+
     def test_hub_owner_must_keep_role_and_enablement(self):
         for change in ("enabled", "roles"):
             frappe.set_user("Administrator")

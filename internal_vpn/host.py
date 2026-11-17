@@ -15,8 +15,19 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 VPN_RANGE = ipaddress.IPv4Network("100.64.0.0/10")
-SNAPSHOT_FIELDS = {"version", "topology", "name", "revision", "subnet", "address", "public_key", "peers"}
+SNAPSHOT_FIELDS = {
+    "version",
+    "topology",
+    "name",
+    "revision",
+    "subnet",
+    "address",
+    "public_key",
+    "peers",
+    "access",
+}
 PEER_FIELDS = {"public_key", "address", "endpoint", "allowed_ips"}
+ACCESS_TABLE = "inet internal_vpn_access"
 UNIT_FIELDS = ("LoadState", "ActiveState", "Result", "ExecMainStatus", "ExecMainExitTimestampMonotonic")
 MAX_PEERS = 10000
 MAX_PROBES = 8
@@ -32,9 +43,12 @@ class WireGuard:
             raise ValueError("Invalid local interface")
         self.interface = interface
 
-    def execute(self, *command: str, timeout: int = 15, check: bool = True) -> subprocess.CompletedProcess:
+    def execute(
+        self, *command: str, timeout: int = 15, check: bool = True, input: str | None = None
+    ) -> subprocess.CompletedProcess:
         return subprocess.run(
             command,
+            input=input,
             check=check,
             text=True,
             capture_output=True,
@@ -200,7 +214,7 @@ class Host:
         """Reject the whole snapshot before any peer changes."""
         if set(snapshot) != SNAPSHOT_FIELDS:
             raise ValueError("Unexpected configuration fields")
-        if type(snapshot["version"]) is not int or snapshot["version"] != 2:
+        if type(snapshot["version"]) is not int or snapshot["version"] != 3:
             raise ValueError("Unsupported configuration version")
         if type(snapshot["revision"]) is not int or snapshot["revision"] < 1:
             raise ValueError("Invalid revision")
@@ -232,6 +246,23 @@ class Host:
                 if key != self.config.get("hub_public_key") or peer["allowed_ips"] != str(self.subnet):
                     raise ValueError("Only the pinned hub may route the subnet")
                 WireGuard.parse_endpoint(peer["endpoint"])
+        self.validate_access(snapshot)
+
+    def validate_access(self, snapshot: dict):
+        """The hub always gets the server list; spokes get none."""
+        access = snapshot["access"]
+        if snapshot["topology"] == "spoke":
+            if access is not None:
+                raise ValueError("Invalid access rules")
+            return
+        if (
+            not isinstance(access, dict)
+            or set(access) != {"services"}
+            or not isinstance(access["services"], list)
+        ):
+            raise ValueError("Invalid access rules")
+        for address in access["services"]:
+            WireGuard.parse_address(address, self.subnet)
 
     @staticmethod
     def accept_revision(path: Path, revision: int, digest: str):
@@ -287,6 +318,30 @@ class Host:
             if endpoint:
                 arguments += ["endpoint", endpoint]
             self.wireguard.set_peer(key, *arguments)
+        if snapshot["topology"] == "hub":
+            self.apply_access(snapshot["access"])
+
+    def apply_access(self, access: dict):
+        """Replace the hub's member-to-member rules in one nft transaction. Servers reach each other,
+        members reach servers, and nothing opens a device."""
+        link = f'iifname "{self.wireguard.interface}" oifname "{self.wireguard.interface}"'
+        rules = [f"{link} ct state established,related accept"]
+        if access["services"]:
+            services = f"{{ {', '.join(access['services'])} }}"
+            rules += [
+                f"{link} ip saddr {services} ip daddr {services} accept",
+                f"{link} ip daddr {services} accept",
+            ]
+        rules.append(f"{link} counter drop")
+        body = "".join(f"\t\t{rule}\n" for rule in rules)
+        self.wireguard.execute(
+            "nft",
+            "-f",
+            "-",
+            input=f"table {ACCESS_TABLE}\ndelete table {ACCESS_TABLE}\n"
+            f"table {ACCESS_TABLE} {{\n\tchain forward {{\n"
+            f"\t\ttype filter hook forward priority 10; policy accept;\n{body}\t}}\n}}\n",
+        )
 
     def measure(self, probes: list[str] = (), unit: str | None = None) -> dict:
         """Read-only sample: per-peer handshake age and counters, optional VPN pings and updater result."""

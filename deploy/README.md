@@ -36,7 +36,7 @@ Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 | `hub_public_key` | Hub key, spokes only |
 | `url`, `token`, `ca_file` | App URL, the host user's `api_key:api_secret`, optional CA file |
 
-The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
+Run the same `host.py` version as the app on every host. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
 
 Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn`, mode `0440`, with the bench user. Check it with `visudo -cf`. It lets Frappe start the updater right after a change; otherwise the timer catches up. Grant nothing else, and keep the agent files root-owned.
 
