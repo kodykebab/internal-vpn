@@ -10,10 +10,18 @@ Host provisioning owns `ivpn0`, its private key, address and firewall. This guid
 
 ## Prerequisites
 
-- Root, Python 3.10+ and `wg`. Run the agent in the host's own network namespace.
+- Root, Python 3.10+, `wg`, and `nft` on the hub. Run the agent in the host's own network namespace.
 - `ivpn0` with a key generated on the host and the address from registration.
 - Hub only: no NAT. [Start at boot](#start-at-boot) sets forwarding, redirects and the firewall.
 - HTTPS to the VPN app that does not go through the tunnel.
+
+## Frappe Cloud
+
+- Hub: a Frappe image server with a public IP. WireGuard does not pass through the platform's web proxy.
+- Use paid plans. Free trials sleep and lock SSH, the web console and Pilot.
+- If the server firewall is on, allow the hub's UDP port inbound. Spokes need no inbound rule.
+- Install the app with Pilot: **Import app** from the repository, then **New site** with Internal VPN.
+- Run host steps as root in the server's **Web console**. Install `wireguard-tools`, and `nftables` on the hub.
 
 ## Install
 
@@ -56,7 +64,7 @@ Keep `ListenPort` on the hub only. Leave out `[Peer]` sections: the agent manage
 On the hub, set the interface and subnet in [hub.nft](hub.nft), then:
 
 ```sh
-printf 'net.ipv4.ip_forward=1\nnet.ipv4.conf.all.send_redirects=0\n' | sudo tee /etc/sysctl.d/90-internal-vpn.conf
+printf 'net.ipv4.ip_forward=1\nnet.ipv4.conf.all.send_redirects=0\nnet.ipv4.conf.default.send_redirects=0\n' | sudo tee /etc/sysctl.d/90-internal-vpn.conf
 sudo sysctl --system
 sudo install -d -m 0700 /etc/internal-vpn
 sudo install -m 0600 deploy/hub.nft /etc/internal-vpn/hub.nft
