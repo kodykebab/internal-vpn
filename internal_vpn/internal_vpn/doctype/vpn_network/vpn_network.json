@@ -8,9 +8,9 @@
     "subnet",
     "hub",
     "hub_endpoint",
+    "stale_minutes",
     "revision",
-    "hub_digest",
-    "hub_alert"
+    "hub_digest"
   ],
   "fields": [
     {
@@ -34,6 +34,14 @@
       "mandatory_depends_on": "eval:doc.hub"
     },
     {
+      "fieldname": "stale_minutes",
+      "label": "Stale After (Minutes)",
+      "fieldtype": "Int",
+      "default": "5",
+      "non_negative": 1,
+      "description": "A server that has not reported for this long is Stale, and managers are notified."
+    },
+    {
       "fieldname": "revision",
       "label": "Revision",
       "fieldtype": "Int",
@@ -42,13 +50,6 @@
     {
       "fieldname": "hub_digest",
       "label": "Hub Digest",
-      "fieldtype": "Data",
-      "read_only": 1,
-      "hidden": 1
-    },
-    {
-      "fieldname": "hub_alert",
-      "label": "Hub Alert",
       "fieldtype": "Data",
       "read_only": 1,
       "hidden": 1

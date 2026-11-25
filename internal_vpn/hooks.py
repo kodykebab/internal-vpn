@@ -25,5 +25,5 @@ doc_events = {
     }
 }
 scheduler_events = {
-    "cron": {"*/5 * * * *": ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.check_hub"]}
+    "cron": {"* * * * *": ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.refresh_statuses"]}
 }

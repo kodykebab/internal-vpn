@@ -10,7 +10,14 @@ from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNMember,
 class VPNServer(VPNMember):
     """A hub or service host. Its host user acts for it through the `agent` permission."""
 
-    system_fields = ("address", "reported_revision", "apply_success", "reported_at", "reported_digest")
+    system_fields = (
+        "address",
+        "status",
+        "reported_revision",
+        "apply_success",
+        "reported_at",
+        "reported_digest",
+    )
 
     def validate(self):
         super().validate()
@@ -51,4 +58,5 @@ class VPNServer(VPNMember):
             },
             update_modified=False,
         )
+        network.refresh_statuses()
         return {"accepted": True}

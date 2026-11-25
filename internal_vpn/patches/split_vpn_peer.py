@@ -41,9 +41,9 @@ def execute():
             "hub_endpoint": hub_endpoint,
             "revision": (network.revision or 0) + 1,
             "hub_digest": None,
-            "hub_alert": network.hub_alert,
         },
     )
     # Migrate removes the orphan VPN Peer DocType but keeps tables; the rows are moved, so drop them.
     frappe.db.sql_ddl("DROP TABLE IF EXISTS `tabVPN Peer`")
     frappe.db.sql_ddl("DROP TABLE IF EXISTS `tabVPN Network`")
+    frappe.get_doc("VPN Network").refresh_statuses()

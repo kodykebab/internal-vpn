@@ -17,8 +17,9 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 
 | Path | Purpose |
 | --- | --- |
-| `internal_vpn/internal_vpn/doctype/vpn_network` | The network settings (Single): subnet, hub, revisions, status, alerts, user hooks. Shared member rules |
-| `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports |
+| `internal_vpn/internal_vpn/doctype/vpn_network` | The network settings (Single): subnet, hub, revisions, server status, user hooks. Shared member rules |
+| `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports, status |
+| `internal_vpn/internal_vpn/notification` | **VPN Server Health**: notifies managers when a server turns Failed or Stale, and when it recovers |
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
 | `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |
@@ -41,7 +42,7 @@ The hub enforces who reaches whom: servers reach each other, members reach serve
 
 1. Create a dedicated site with this app, using Pilot or bench and Python 3.14+.
 2. Set up an outgoing Email Account. Installing the app turns on email link sign-in and turns off password sign-in for every user, Administrator included.
-3. Open Desk as Administrator with `bench --site <site> browse --user Administrator` and finish the setup wizard. Until then, Frappe sends other users to it.
+3. Open Desk as Administrator with Pilot's login as Administrator (or `bench --site <site> browse --user Administrator`) and finish the setup wizard. Until then, Frappe sends other users to it.
 4. Create operator users with `VPN Manager`. Keep signup off in Website Settings.
 5. Managers invite engineers with **Invite Engineer** on VPN Network. Frappe emails the invitation; accepting it adds `VPN Engineer`.
 6. Set up the hosts with the [host guide](deploy/README.md).

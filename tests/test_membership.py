@@ -81,7 +81,7 @@ class MembershipTests(unittest.TestCase):
                 "hub_endpoint": None,
                 "revision": 0,
                 "hub_digest": None,
-                "hub_alert": None,
+                "stale_minutes": 5,
             },
         )
         for email in (ENGINEER, OTHER, HUB, SPOKE):
@@ -166,8 +166,9 @@ class MembershipTests(unittest.TestCase):
             digest=WireGuard.digest(snapshot),
         )
 
-    def status(self):
-        return self.call(MANAGER, "VPN Network", "VPN Network", "get_status", http_method="GET")
+    def hub_status(self):
+        frappe.db.rollback()
+        return frappe.db.get_value("VPN Server", self.hub.name, "status")
 
     @staticmethod
     def revision():
@@ -216,7 +217,7 @@ class MembershipTests(unittest.TestCase):
             lambda: self.update("VPN Device", device.name, actor=OTHER, enabled=0),
             lambda: self.delete("VPN Device", device.name, actor=OTHER),
             lambda: self.call(OTHER, "VPN Device", device.name, "get_configuration", http_method="GET"),
-            lambda: self.call(ENGINEER, "VPN Network", "VPN Network", "get_status", http_method="GET"),
+            lambda: self.act(ENGINEER, lambda: frappe.get_doc("VPN Network").check_permission("read")),
         ):
             with self.assertRaises(frappe.PermissionError):
                 action()
@@ -297,11 +298,11 @@ class MembershipTests(unittest.TestCase):
         # The hub may apply this configuration without successfully reporting it.
         self.hub_configuration()
         self.update("VPN Device", device.name, enabled=0)
-        self.assertFalse(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Pending")
         with self.assertRaises(frappe.ValidationError):
             self.delete("VPN Device", device.name)
         self.report_hub()
-        self.assertTrue(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Current")
         self.delete("VPN Device", device.name)
 
     def test_hub_cannot_be_disabled_or_deleted(self):
@@ -320,7 +321,7 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(frappe.db.get_value("VPN Device", device.name, "address"), device.address)
         self.assertEqual(frappe.db.get_value("VPN Server", self.hub.name, "reported_revision"), revision)
         self.assertEqual(self.revision(), revision)
-        self.assertTrue(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Current")
 
     def test_membership_edits_use_native_versions_but_reports_do_not(self):
         device = self.device()
@@ -348,7 +349,7 @@ class MembershipTests(unittest.TestCase):
         self.save_network(hub_endpoint="192.0.2.1:051820")
         self.assertEqual(self.revision(), revision)
         self.wakeup.assert_not_called()
-        self.assertTrue(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Current")
 
     def test_spoke_lookup_is_bounded_and_matches_full_snapshot(self):
         service = self.server(SPOKE, key(2))
@@ -386,7 +387,7 @@ class MembershipTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
         self.report_hub()
-        self.assertTrue(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Current")
 
     def test_polling_and_revocation_leave_consistent_snapshots(self):
         service = self.server(SPOKE, key(2))
@@ -458,7 +459,7 @@ class MembershipTests(unittest.TestCase):
         for value in (revision - 1, revision + 1):
             with self.subTest(revision=value), self.assertRaises(frappe.ValidationError):
                 self.call(HUB, "VPN Server", self.hub.name, "report", revision=value, success=False)
-        self.assertTrue(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Current")
 
     def test_http_host_authentication_and_method_restrictions(self):
         frappe.set_user("Administrator")
@@ -510,7 +511,7 @@ class MembershipTests(unittest.TestCase):
         snapshot = self.hub_configuration()
         self.assertGreater(snapshot["revision"], revision)
         self.assertNotIn(device.address, [peer["address"] for peer in snapshot["peers"]])
-        self.assertFalse(self.status()["hub_current"])
+        self.assertEqual(self.hub_status(), "Pending")
 
     def test_owner_change_without_hooks_advances_hub_revision(self):
         device = self.device()
@@ -527,40 +528,49 @@ class MembershipTests(unittest.TestCase):
             Host.accept_revision(watermark, first["revision"], WireGuard.digest(first))
             Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
 
-    def test_hub_alerts_notify_once_per_problem_and_on_recovery(self):
-        def check(at=None):
-            def run():
-                with patch(f"{MODULE}.now_datetime", return_value=at or now_datetime()):
-                    VPNNetwork.load_locked().check_hub()
+    def test_status_follows_reports_and_notifies_managers_of_problems(self):
+        service = self.server(SPOKE, key(2))
+        notify = "frappe.email.doctype.notification.notification.enqueue_create_notification"
 
-            # As the scheduler runs jobs.
-            self.act("Administrator", run)
-            return [call.args[1]["subject"] for call in notify.call_args_list]
+        def refresh(minutes=0):
+            with patch(f"{MODULE}.now_datetime", return_value=add_to_date(now_datetime(), minutes=minutes)):
+                self.act("Administrator", lambda: frappe.get_doc("VPN Network").refresh_statuses())
 
-        with patch(f"{MODULE}.enqueue_create_notification") as notify:
-            self.assertEqual(check(add_to_date(now_datetime(), minutes=10)), [])
-            with patch.dict(frappe.conf, {"internal_vpn_hub_alert_minutes": 5}):
-                later = add_to_date(now_datetime(), minutes=10)
-                self.assertEqual(check(later), ["The VPN hub has stopped reporting"])
-                self.assertEqual(len(check(later)), 1)
-                self.assertIn(MANAGER, notify.call_args.args[0])
-                self.report_hub()
-                self.assertEqual(check()[-1], "Resolved: The VPN hub has stopped reporting")
-                self.device()
-                frappe.db.set_single_value(
-                    "VPN Network", "modified", add_to_date(now_datetime(), minutes=-10), update_modified=False
-                )
-                frappe.db.commit()
-                self.assertEqual(check()[-1], "The VPN hub has not applied the latest membership")
+        def statuses():
+            frappe.db.rollback()
+            return dict(frappe.get_all("VPN Server", fields=["name", "status"], as_list=True))
 
-    def test_status_marks_hosts_stale(self):
-        self.report_hub()
-        self.assertTrue(self.status()["all_current"])
-        with patch(f"{MODULE}.now_datetime", return_value=add_to_date(now_datetime(), minutes=10)):
-            status = self.status()
-        hub = next(host for host in status["hosts"] if host["name"] == self.hub.name)
-        self.assertTrue(hub["current"] and hub["stale"])
-        self.assertFalse(status["all_current"])
+        with patch(notify) as alerts:
+            self.assertEqual(statuses(), {self.hub.name: "Pending", service.name: "Pending"})
+            self.report_hub()
+            self.assertEqual(statuses()[self.hub.name], "Current")
+            self.device()
+            self.assertEqual(statuses()[self.hub.name], "Pending")
+            self.report_hub()
+            self.assertEqual(statuses()[self.hub.name], "Current")
+            alerts.assert_not_called()
+
+            refresh(minutes=10)
+            self.assertEqual(statuses(), {self.hub.name: "Stale", service.name: "Stale"})
+            subjects = sorted(call.args[1]["subject"] for call in alerts.call_args_list)
+            self.assertEqual(subjects, ["VPN server service is Stale", "VPN server service is Stale"])
+            self.assertTrue(all(MANAGER in call.args[0] for call in alerts.call_args_list))
+            refresh(minutes=10)
+            self.assertEqual(alerts.call_count, 2)
+
+            alerts.reset_mock()
+            self.report_hub()
+            self.assertEqual(statuses()[self.hub.name], "Current")
+            self.assertEqual(
+                [call.args[1]["subject"] for call in alerts.call_args_list], ["VPN server service is Current"]
+            )
+
+            alerts.reset_mock()
+            self.call(HUB, "VPN Server", self.hub.name, "report", revision=self.revision(), success=False)
+            self.assertEqual(statuses()[self.hub.name], "Failed")
+            self.assertEqual(
+                [call.args[1]["subject"] for call in alerts.call_args_list], ["VPN server service is Failed"]
+            )
 
     def test_hub_snapshot_lists_servers_and_spokes_get_no_rules(self):
         service = self.server(SPOKE, key(2))

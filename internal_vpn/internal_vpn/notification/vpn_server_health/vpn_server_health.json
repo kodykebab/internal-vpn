@@ -1,0 +1,22 @@
+{
+ "channel": "System Notification",
+ "condition": "doc.enabled and (doc.status in (\"Failed\", \"Stale\") or (doc.status == \"Current\" and (doc.get_doc_before_save() or {}).get(\"status\") in (\"Failed\", \"Stale\")))",
+ "condition_type": "Python",
+ "doctype": "Notification",
+ "document_type": "VPN Server",
+ "enabled": 1,
+ "event": "Value Change",
+ "is_standard": 1,
+ "message_type": "Markdown",
+ "modified": "2026-11-26 00:00:00.000000",
+ "module": "Internal VPN",
+ "name": "VPN Server Health",
+ "notification_type": "Alert",
+ "recipients": [
+  {
+   "receiver_by_role": "VPN Manager"
+  }
+ ],
+ "subject": "VPN server {{ doc.label }} is {{ doc.status }}",
+ "value_changed": "status"
+}

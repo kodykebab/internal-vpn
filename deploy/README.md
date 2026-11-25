@@ -88,7 +88,8 @@ The firewall loads before `ivpn0` and the agent. It blocks hub services from mem
 | Task | Steps |
 | --- | --- |
 | Add an engineer | Manager: **Invite Engineer** on VPN Network. Engineer: accept the email, create a VPN Device, import the configuration it shows. Later sign-ins use the email link on the login page. |
-| Disable a member | Clear **Enabled**. Status shows the hub Current once applied. |
+| Disable a member | Clear **Enabled**. The hub's status in the VPN Server list turns Current once applied. |
+| Watch servers | The VPN Server list shows each server Current, Pending, Failed or Stale. **VPN Server Health** notifies managers when one turns Failed or Stale, and when it recovers. Set **Stale After (Minutes)** on VPN Network. Status needs the scheduler. To stop alerts, disable the notification. |
 | Revoke a user | Disable the user or remove their VPN role. |
 | Free an address | Delete a disabled member after the hub has applied the change. |
 | Rotate a key | Change **WireGuard Public Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
@@ -104,7 +105,6 @@ All are off by default.
 | --- | --- |
 | Two-factor login | System Settings > Enable Two Factor Auth |
 | Backups | Schedule site backups. Keep each host's `/var/lib/internal-vpn` |
-| Hub alerts | `bench --site <site> set-config internal_vpn_hub_alert_minutes 10`, scheduler on. Managers get one notification per outage and one on recovery |
 
 ## Database recovery
 

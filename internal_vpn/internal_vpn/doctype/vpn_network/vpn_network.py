@@ -2,17 +2,15 @@ import subprocess
 
 import frappe
 from frappe import _
-from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
 from frappe.model.document import Document
 from frappe.query_builder import DocType
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
-from frappe.utils.user import get_users_with_role
 
 from internal_vpn.host import MAX_PEERS, WireGuard
 
 MEMBER_ROLES = {"VPN Server": "VPN Host", "VPN Device": "VPN Engineer"}
 MEMBER_OWNERS = {"VPN Server": "user", "VPN Device": "owner"}
-SYSTEM_FIELDS = ("revision", "hub_digest", "hub_alert")
+SYSTEM_FIELDS = ("revision", "hub_digest")
 
 
 class VPNNetwork(Document):
@@ -39,6 +37,10 @@ class VPNNetwork(Document):
             self.hub_digest = None
             frappe.db.after_commit.add(self.request_hub_update)
 
+    def on_update(self):
+        if self.has_value_changed("revision") or self.has_value_changed("stale_minutes"):
+            self.refresh_statuses()
+
     def validate_hub(self, previous: str | None):
         if previous and self.hub != previous:
             frappe.throw(_("Replacing the hub needs explicit reprovisioning"))
@@ -54,7 +56,29 @@ class VPNNetwork(Document):
         self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None})
         if self.hub:
             frappe.db.after_commit.add(self.request_hub_update)
+        self.refresh_statuses()
         return self.revision
+
+    def refresh_statuses(self):
+        """Store each server's status. A change runs the VPN Server Health notification."""
+        if not self.hub:
+            return
+        hub, members = self.get_membership()
+        deadline = add_to_date(now_datetime(), minutes=-(cint(self.stale_minutes) or 5))
+        for server in frappe.get_all("VPN Server", fields=["*"], order_by="name asc", limit=0):
+            status = self.server_status(server, hub, members, deadline)
+            if status != server.status:
+                frappe.get_doc("VPN Server", server.name).db_set("status", status, update_modified=False)
+
+    def server_status(self, server, hub, members, deadline) -> str:
+        """A missing report outranks the applied state: the host may have stopped running."""
+        if get_datetime(server.reported_at or server.creation) < deadline:
+            return "Stale"
+        if self.is_current(server, hub, members):
+            return "Current"
+        if server.reported_at and not server.apply_success:
+            return "Failed"
+        return "Pending"
 
     @staticmethod
     def request_hub_update():
@@ -198,73 +222,6 @@ class VPNNetwork(Document):
             else None,
         }
 
-    @frappe.whitelist(methods=["GET"])
-    def get_status(self) -> dict:
-        """Last application report per server."""
-        status = {
-            "revision": self.revision,
-            "hub": self.hub,
-            "hub_current": False,
-            "hosts": [],
-            "all_current": False,
-        }
-        if not self.hub:
-            return status
-
-        hub, members = self.get_membership()
-        deadline = self.report_deadline()
-        for server in frappe.get_all("VPN Server", fields=["*"], order_by="name asc", limit=0):
-            server = frappe._dict(server, doctype="VPN Server")
-            status["hosts"].append(
-                {
-                    "name": server.name,
-                    "label": server.label,
-                    "address": server.address,
-                    "user": server.user,
-                    "enabled": server.enabled,
-                    "reported_revision": server.reported_revision,
-                    "apply_success": server.apply_success,
-                    "reported_at": server.reported_at,
-                    "required": server.name in members,
-                    "current": self.is_current(server, hub, members),
-                    "stale": bool(server.reported_at and server.reported_at < deadline),
-                }
-            )
-        status["hub_current"] = next(host["current"] for host in status["hosts"] if host["name"] == self.hub)
-        status["all_current"] = all(
-            host["current"] and not host["stale"] for host in status["hosts"] if host["required"]
-        )
-        return status
-
-    @staticmethod
-    def report_deadline():
-        """Reports older than this are stale: the alert threshold, or 5 minutes when alerts are off."""
-        minutes = cint(frappe.conf.get("internal_vpn_hub_alert_minutes")) or 5
-        return add_to_date(now_datetime(), minutes=-minutes)
-
-    def check_hub(self):
-        """Notify VPN Managers once when the hub stops reporting or lags membership, and once on recovery."""
-        if not cint(frappe.conf.get("internal_vpn_hub_alert_minutes")) or not self.hub:
-            return
-        status = self.get_status()
-        hub = next(host for host in status["hosts"] if host["name"] == self.hub)
-        since = self.report_deadline()
-        problem = None
-        modified = get_datetime(self.modified)
-        if (hub["reported_at"] or modified) < since:
-            problem = "The VPN hub has stopped reporting"
-        elif not status["hub_current"] and modified < since:
-            problem = "The VPN hub has not applied the latest membership"
-        if (problem or "") == (self.hub_alert or ""):
-            return
-        subject = problem or f"Resolved: {self.hub_alert}"
-        self.db_set("hub_alert", problem, update_modified=False)
-        frappe.logger("internal_vpn", allow_site=True).warning(subject)
-        enqueue_create_notification(
-            get_users_with_role("VPN Manager"),
-            {"type": "Alert", "document_type": self.doctype, "document_name": self.name, "subject": subject},
-        )
-
     def on_user_change(self, user, method: str):
         """Track owner eligibility changes; keep the hub eligible."""
         relevant = set(MEMBER_ROLES.values())
@@ -347,8 +304,9 @@ def has_desk_access() -> bool:
     return bool(frappe.has_permission("VPN Device", "read") or frappe.has_permission("VPN Network", "read"))
 
 
-def check_hub():
-    VPNNetwork.load_locked().check_hub()
+def refresh_statuses():
+    """Scheduled, so servers that stop reporting turn Stale."""
+    frappe.get_doc("VPN Network").refresh_statuses()
 
 
 def on_user_change(user, method=None):

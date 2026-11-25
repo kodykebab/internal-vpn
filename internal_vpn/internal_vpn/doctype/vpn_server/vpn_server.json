@@ -10,6 +10,7 @@
     "public_key",
     "address",
     "enabled",
+    "status",
     "report_section",
     "reported_revision",
     "apply_success",
@@ -54,6 +55,16 @@
       "fieldtype": "Check",
       "default": "1",
       "in_list_view": 1
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Pending\nCurrent\nFailed\nStale",
+      "default": "Pending",
+      "read_only": 1,
+      "in_standard_filter": 1,
+      "description": "Current: the host applied the latest membership. Stale: no report within the network's limit."
     },
     {
       "fieldname": "report_section",
