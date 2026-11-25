@@ -1,50 +1,57 @@
 import subprocess
 
 import frappe
+from frappe import _
 from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
 from frappe.model.document import Document
-from frappe.utils import add_to_date, cint, now_datetime
+from frappe.query_builder import DocType
+from frappe.utils import add_to_date, cint, get_datetime, now_datetime
+from frappe.utils.user import get_users_with_role
 
 from internal_vpn.host import MAX_PEERS, WireGuard
 
-ACTION_WRITE = object()
-ROLE_FOR_KIND = {"Service": "VPN Host", "Device": "VPN Engineer"}
+MEMBER_ROLES = {"VPN Server": "VPN Host", "VPN Device": "VPN Engineer"}
+MEMBER_OWNERS = {"VPN Server": "user", "VPN Device": "owner"}
+SYSTEM_FIELDS = ("revision", "hub_digest", "hub_alert")
 
 
 class VPNNetwork(Document):
-    """The `default` network; its row lock serializes allocation and revisions."""
-
-    def before_validate(self):
-        if self.flags.vpn_action is not ACTION_WRITE:
-            frappe.throw("Use the VPN action methods to change membership")
-
-    def on_trash(self):
-        frappe.throw("The VPN network cannot be deleted")
-
-    def before_rename(self, *args, **kwargs):
-        frappe.throw("VPN records cannot be renamed")
+    """Network settings. The row lock serializes allocation and revisions."""
 
     @staticmethod
-    def save_document(doc):
-        # An identity marker cannot be supplied through a serialized document.
-        doc.flags.vpn_action = ACTION_WRITE
-        try:
-            doc.save(ignore_permissions=True)
-        finally:
-            doc.flags.pop("vpn_action", None)
+    def load_locked() -> "VPNNetwork":
+        return frappe.get_doc("VPN Network", "VPN Network", for_update=True)
 
-    def lock(self, new_transaction: bool = True) -> "VPNNetwork":
-        # Refresh the auth snapshot to avoid MariaDB error 1020. Call before any writes.
-        # User hooks keep their enclosing transaction instead.
-        if new_transaction:
-            frappe.db.commit()
-        self.update(frappe.db.get_value(self.doctype, self.name, "*", as_dict=True, for_update=True))
-        return self
+    def validate(self):
+        frappe.db.get_singles_dict(self.doctype, for_update=True)
+        before = self.get_doc_before_save() or frappe._dict()
+        for field in SYSTEM_FIELDS:
+            self.set(field, before.get(field))
+        if self.subnet:
+            self.subnet = str(parse(WireGuard.parse_subnet, self.subnet))
+        if before.subnet and self.subnet != before.subnet:
+            frappe.throw(_("Readdressing an existing network is not supported"))
+        if self.hub_endpoint:
+            self.hub_endpoint = parse(WireGuard.parse_endpoint, self.hub_endpoint)
+        self.validate_hub(before.hub)
+        if any(self.get(field) != before.get(field) for field in ("subnet", "hub", "hub_endpoint")):
+            self.revision = cint(self.revision) + 1
+            self.hub_digest = None
+            frappe.db.after_commit.add(self.request_hub_update)
+
+    def validate_hub(self, previous: str | None):
+        if previous and self.hub != previous:
+            frappe.throw(_("Replacing the hub needs explicit reprovisioning"))
+        if not self.hub:
+            return
+        if not self.subnet or not self.hub_endpoint:
+            frappe.throw(_("The hub requires a subnet and a UDP endpoint"))
+        hub = frappe.db.get_value("VPN Server", self.hub, ["user", "enabled"], as_dict=True)
+        if not hub or not hub.enabled or not self.is_eligible(hub.user, "VPN Server"):
+            frappe.throw(_("The hub must be an enabled server whose user has the VPN Host role"))
 
     def advance_revision(self) -> int:
-        self.revision += 1
-        self.hub_digest = None
-        self.save_document(self)
+        self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None})
         if self.hub:
             frappe.db.after_commit.add(self.request_hub_update)
         return self.revision
@@ -72,56 +79,72 @@ class VPNNetwork(Document):
             )
 
     @staticmethod
-    def get_locked() -> "VPNNetwork":
-        return frappe.get_doc("VPN Network", "default").lock()
+    def is_eligible(user: str, doctype: str) -> bool:
+        enabled = frappe.db.get_value("User", user, "enabled")
+        return bool(enabled) and MEMBER_ROLES[doctype] in frappe.get_roles(user)
 
-    @staticmethod
-    def get_peers() -> list[dict]:
-        return frappe.db.sql("SELECT * FROM `tabVPN Peer` ORDER BY name FOR UPDATE", as_dict=True)
-
-    @staticmethod
-    def is_eligible(user: str, kind: str) -> bool:
-        return bool(
-            frappe.db.get_value("User", user, "enabled")
-            and frappe.db.exists(
-                "Has Role", {"parent": user, "parenttype": "User", "role": ROLE_FOR_KIND[kind]}
-            )
+    def allocate_address(self) -> str:
+        """Reserve capacity for disabled members too, so enabling one cannot overflow the hub."""
+        if not self.subnet:
+            frappe.throw(_("Set the network subnet first"))
+        used = {
+            address
+            for doctype in MEMBER_ROLES
+            for address in frappe.get_all(doctype, pluck="address", limit=0)
+        }
+        if len(used) >= MAX_PEERS + 1:
+            frappe.throw(_("Network member limit reached; delete unused members first"))
+        address = next(
+            (str(ip) for ip in WireGuard.parse_subnet(self.subnet).hosts() if str(ip) not in used), None
         )
+        if not address:
+            frappe.throw(_("Subnet exhausted"))
+        return address
 
-    def get_membership(self, peer=None) -> tuple[dict, dict[str, dict]]:
-        """Enabled peers with enabled, eligible owners."""
-        names = (self.hub, peer.name) if peer and peer.name != self.hub else None
-        members = frappe.db.sql(
-            """SELECT peer.* FROM `tabVPN Peer` peer
-            JOIN `tabUser` account ON account.name = peer.user AND account.enabled = 1
-            WHERE peer.enabled = 1 AND EXISTS (
-                SELECT 1 FROM `tabHas Role` role
-                WHERE role.parent = peer.user AND role.parenttype = 'User'
-                AND role.role = IF(peer.kind = 'Service', %(service)s, %(device)s))
-            """
-            + (" AND peer.name IN %(names)s" if names else "")
-            + " ORDER BY peer.name",
-            {"service": ROLE_FOR_KIND["Service"], "device": ROLE_FOR_KIND["Device"], "names": names},
-            as_dict=True,
-        )
-        members = {peer.name: peer for peer in members}
+    def get_membership(self, member=None) -> tuple[dict, dict[str, dict]]:
+        """Enabled members with enabled, eligible owners. With `member`, only it and the hub."""
+        names = [self.hub, member.name] if member and member.name != self.hub else None
+        members = {}
+        for doctype, role in MEMBER_ROLES.items():
+            for row in self.query_members(doctype, role, names):
+                members[row.name] = frappe._dict(row, doctype=doctype)
         hub = members.get(self.hub)
         if not hub:
-            frappe.throw("Select an active hub before configuring the network")
-        return hub, members
+            frappe.throw(_("Select an active hub before configuring the network"))
+        return hub, dict(sorted(members.items()))
 
-    def is_current(self, peer, hub, members) -> bool:
+    @staticmethod
+    def query_members(doctype: str, role: str, names: list[str] | None) -> list[dict]:
+        member, user, has_role = DocType(doctype), DocType("User"), DocType("Has Role")
+        owner = member[MEMBER_OWNERS[doctype]]
+        owners_with_role = (
+            frappe.qb.from_(has_role)
+            .select(has_role.parent)
+            .where((has_role.role == role) & (has_role.parenttype == "User"))
+        )
+        query = (
+            frappe.qb.from_(member)
+            .join(user)
+            .on(user.name == owner)
+            .select(member.star)
+            .where((member.enabled == 1) & (user.enabled == 1) & owner.isin(owners_with_role))
+        )
+        if names:
+            query = query.where(member.name.isin(names))
+        return query.run(as_dict=True)
+
+    def is_current(self, member, hub, members) -> bool:
         """Match the applied state, not tunnel health."""
-        desired = WireGuard.digest(self.build_configuration(peer, hub, members))
+        desired = WireGuard.digest(self.build_configuration(member, hub, members))
         return bool(
-            peer.apply_success
-            and peer.reported_digest == desired
-            and (peer.name != hub.name or peer.reported_revision == self.revision)
+            member.apply_success
+            and member.reported_digest == desired
+            and (member.name != hub.name or member.reported_revision == self.revision)
         )
 
-    def get_configuration(self, peer) -> dict:
-        snapshot = self.build_configuration(peer, *self.get_membership(peer))
-        if peer.name == self.hub:
+    def get_configuration(self, member) -> dict:
+        snapshot = self.build_configuration(member, *self.get_membership(member))
+        if member.name == self.hub:
             self.issue_hub_digest(snapshot)
         return snapshot
 
@@ -133,114 +156,53 @@ class VPNNetwork(Document):
         if self.hub_digest:
             snapshot["revision"] = self.advance_revision()
         self.db_set("hub_digest", digest, update_modified=False)
-        # Configuration is fetched with GET, which Frappe rolls back.
-        frappe.db.commit()
 
-    def build_configuration(self, peer, hub, members) -> dict:
+    def build_configuration(self, member, hub, members) -> dict:
         """Protocol v3 snapshot. The hub lists every member as a /32, plus the servers for its rules;
         a spoke lists only the hub."""
 
-        def entry(member, endpoint, allowed_ips):
+        def entry(peer, endpoint, allowed_ips):
             return {
-                "public_key": member.public_key,
-                "address": member.address,
+                "public_key": peer.public_key,
+                "address": peer.address,
                 "endpoint": endpoint,
                 "allowed_ips": allowed_ips,
             }
 
-        is_hub = peer.name == hub.name
-        if peer.name not in members:
+        is_hub = member.name == hub.name
+        if member.name not in members:
             peers = []
         elif is_hub:
-            others = sorted(
-                (m for m in members.values() if m.name != peer.name), key=lambda member: member.name
-            )
-            peers = [entry(member, None, f"{member.address}/32") for member in others]
+            peers = [
+                entry(peer, None, f"{peer.address}/32") for name, peer in members.items() if name != hub.name
+            ]
         else:
-            peers = [entry(hub, hub.endpoint, self.subnet)]
+            peers = [entry(hub, self.hub_endpoint, self.subnet)]
         return {
             "version": 3,
             "topology": "hub" if is_hub else "spoke",
-            "name": peer.name,
+            "name": member.name,
             "revision": self.revision,
             "subnet": self.subnet,
-            "address": peer.address,
-            "public_key": peer.public_key,
+            "address": member.address,
+            "public_key": member.public_key,
             "peers": peers,
             "access": {
                 "services": [
-                    m.address
-                    for _, m in sorted(members.items())
-                    if m.kind == "Service" and m.name != hub.name
+                    peer.address
+                    for name, peer in members.items()
+                    if peer.doctype == "VPN Server" and name != hub.name
                 ]
             }
             if is_hub
             else None,
         }
 
-    def add_peer(
-        self, kind: str, user: str, public_key: str, label: str, endpoint: str | None = None
-    ) -> dict:
-        label = (label or "").strip()
-        if not label:
-            frappe.throw("Name the peer")
-        self.lock()
-        if not self.subnet:
-            frappe.throw("Initialize the subnet first")
-        if not self.is_eligible(user, kind):
-            frappe.throw("Owner must be enabled and have the required VPN role")
-        peers = self.get_peers()
-        # Reserve capacity for disabled peers too, so re-enabling cannot overflow the hub.
-        if len(peers) >= MAX_PEERS + 1:
-            frappe.throw("Network peer limit reached; release unused peers first")
-        if kind == "Service" and any(peer.user == user and peer.kind == "Service" for peer in peers):
-            frappe.throw("Use one dedicated user per service")
-        used = {peer.address for peer in peers}
-        address = next(
-            (str(ip) for ip in WireGuard.parse_subnet(self.subnet).hosts() if str(ip) not in used), None
-        )
-        if not address:
-            frappe.throw("Subnet exhausted")
-
-        peer = frappe.get_doc(
-            {
-                "doctype": "VPN Peer",
-                "kind": kind,
-                "label": label,
-                "user": user,
-                "public_key": public_key,
-                "endpoint": endpoint,
-                "address": address,
-            }
-        )
-        self.save_document(peer)
-        return {"name": peer.name, "address": address, "revision": self.advance_revision()}
-
     @frappe.whitelist(methods=["POST"])
-    def initialize(self, subnet):
-        frappe.only_for("VPN Manager")
-        try:
-            subnet = str(WireGuard.parse_subnet(subnet))
-        except (TypeError, ValueError) as error:
-            frappe.throw(str(error))
-        self.lock()
-        if self.subnet and self.subnet != subnet:
-            frappe.throw("Readdressing an existing network is not supported")
-        if not self.subnet:
-            self.subnet = subnet
-            self.advance_revision()
-        return {"subnet": subnet}
-
-    @frappe.whitelist(methods=["POST"])
-    def register_service(self, user, public_key, label, endpoint=None):
-        frappe.only_for("VPN Manager")
-        return self.add_peer("Service", user, public_key, label, endpoint)
-
-    @frappe.whitelist(methods=["POST"])
-    def add_engineer(self, email, first_name=None):
+    def add_engineer(self, email: str, first_name: str | None = None) -> dict:
         """Give a user the engineer role. A new user gets an initial password for the operator to hand
         over, or Frappe's email link when `internal_vpn_invite_email` is set."""
-        frappe.only_for("VPN Manager")
+        self.check_permission("write")
         password = None
         if frappe.db.exists("User", email):
             user = frappe.get_doc("User", email)
@@ -257,38 +219,12 @@ class VPNNetwork(Document):
                 }
             )
         user.flags.ignore_permissions = True
-        user.add_roles(ROLE_FOR_KIND["Device"])
+        user.add_roles(MEMBER_ROLES["VPN Device"])
         return {"user": user.name, "password": password}
 
-    @frappe.whitelist(methods=["POST"])
-    def register_device(self, public_key, label):
-        frappe.only_for(ROLE_FOR_KIND["Device"])
-        return self.add_peer("Device", frappe.session.user, public_key, label)
-
-    @frappe.whitelist(methods=["POST"])
-    def set_hub(self, peer):
-        frappe.only_for("VPN Manager")
-        self.lock()
-        if self.hub and self.hub != peer:
-            frappe.throw("Replacing the hub needs explicit reprovisioning")
-        hub = frappe.get_doc("VPN Peer", peer, for_update=True)
-        if (
-            hub.kind != "Service"
-            or not hub.endpoint
-            or not hub.enabled
-            or not self.is_eligible(hub.user, "Service")
-        ):
-            frappe.throw("The hub must be an active service with a UDP endpoint")
-        if not self.hub:
-            self.hub = peer
-            self.advance_revision()
-        return {"hub": peer}
-
     @frappe.whitelist(methods=["GET"])
-    def get_status(self):
-        """Last application report per service."""
-        frappe.only_for("VPN Manager")
-        self.lock()
+    def get_status(self) -> dict:
+        """Last application report per server."""
         status = {
             "revision": self.revision,
             "hub": self.hub,
@@ -301,21 +237,21 @@ class VPNNetwork(Document):
 
         hub, members = self.get_membership()
         deadline = self.report_deadline()
-        for peer in self.get_peers():
-            if peer.kind != "Service":
-                continue
+        for server in frappe.get_all("VPN Server", fields=["*"], order_by="name asc", limit=0):
+            server = frappe._dict(server, doctype="VPN Server")
             status["hosts"].append(
                 {
-                    "name": peer.name,
-                    "address": peer.address,
-                    "user": peer.user,
-                    "enabled": peer.enabled,
-                    "reported_revision": peer.reported_revision,
-                    "apply_success": peer.apply_success,
-                    "reported_at": peer.reported_at,
-                    "required": peer.name in members,
-                    "current": self.is_current(peer, hub, members),
-                    "stale": bool(peer.reported_at and peer.reported_at < deadline),
+                    "name": server.name,
+                    "label": server.label,
+                    "address": server.address,
+                    "user": server.user,
+                    "enabled": server.enabled,
+                    "reported_revision": server.reported_revision,
+                    "apply_success": server.apply_success,
+                    "reported_at": server.reported_at,
+                    "required": server.name in members,
+                    "current": self.is_current(server, hub, members),
+                    "stale": bool(server.reported_at and server.reported_at < deadline),
                 }
             )
         status["hub_current"] = next(host["current"] for host in status["hosts"] if host["name"] == self.hub)
@@ -338,24 +274,24 @@ class VPNNetwork(Document):
         hub = next(host for host in status["hosts"] if host["name"] == self.hub)
         since = self.report_deadline()
         problem = None
-        if (hub["reported_at"] or self.modified) < since:
+        modified = get_datetime(self.modified)
+        if (hub["reported_at"] or modified) < since:
             problem = "The VPN hub has stopped reporting"
-        elif not status["hub_current"] and self.modified < since:
+        elif not status["hub_current"] and modified < since:
             problem = "The VPN hub has not applied the latest membership"
         if (problem or "") == (self.hub_alert or ""):
             return
         subject = problem or f"Resolved: {self.hub_alert}"
         self.db_set("hub_alert", problem, update_modified=False)
         frappe.logger("internal_vpn", allow_site=True).warning(subject)
-        managers = frappe.get_all("Has Role", {"role": "VPN Manager", "parenttype": "User"}, pluck="parent")
         enqueue_create_notification(
-            managers,
+            get_users_with_role("VPN Manager"),
             {"type": "Alert", "document_type": self.doctype, "document_name": self.name, "subject": subject},
         )
 
     def on_user_change(self, user, method: str):
         """Track owner eligibility changes; keep the hub eligible."""
-        relevant = set(ROLE_FOR_KIND.values())
+        relevant = set(MEMBER_ROLES.values())
         roles = {row.role for row in user.roles}
         previous = user.get_doc_before_save()
         unchanged = (
@@ -366,33 +302,79 @@ class VPNNetwork(Document):
         if method != "on_trash" and unchanged:
             return
 
-        self.lock(new_transaction=False)
-        peers = self.get_peers()
-        hub_user = next((peer.user for peer in peers if peer.name == self.hub), None)
+        hub_user = frappe.db.get_value("VPN Server", self.hub, "user") if self.hub else None
         if hub_user == user.name and (method == "on_trash" or not user.enabled or "VPN Host" not in roles):
-            frappe.throw("The hub account must stay enabled with the VPN Host role")
-        if any(peer.user == user.name and peer.enabled for peer in peers):
+            frappe.throw(_("The hub account must stay enabled with the VPN Host role"))
+        if any(
+            frappe.db.exists(doctype, {owner: user.name, "enabled": 1})
+            for doctype, owner in MEMBER_OWNERS.items()
+        ):
             self.advance_revision()
 
 
-def has_desk_access():
-    return frappe.has_permission("VPN Network", "read")
+class VPNMember(Document):
+    """A VPN Server or VPN Device. It holds one address until deleted; membership changes advance
+    the network revision."""
+
+    system_fields = ("address",)
+
+    def before_insert(self):
+        for field in self.system_fields:
+            self.set(field, None)
+        self.address = VPNNetwork.load_locked().allocate_address()
+
+    def validate(self):
+        network = VPNNetwork.load_locked()
+        before = self.get_doc_before_save()
+        if before:
+            for field in self.system_fields:
+                self.set(field, before.get(field))
+        self.public_key = parse(WireGuard.validate_public_key, self.public_key)
+        if any(
+            frappe.db.exists(doctype, {"public_key": self.public_key, "name": ("!=", self.name)})
+            for doctype in MEMBER_ROLES
+        ):
+            frappe.throw(_("This WireGuard key is already in use"), frappe.UniqueValidationError)
+        if not self.enabled and self.name == network.hub:
+            frappe.throw(_("The hub must stay enabled"))
+
+    def on_update(self):
+        if self.flags.in_insert or self.has_value_changed("enabled") or self.has_value_changed("public_key"):
+            VPNNetwork.load_locked().advance_revision()
+
+    def on_trash(self):
+        """Free the address only once the hub has applied the removal."""
+        network = VPNNetwork.load_locked()
+        if self.enabled:
+            frappe.throw(_("Disable it first, then delete it once the hub has applied the change"))
+        if network.hub:
+            hub, members = network.get_membership()
+            if not network.is_current(hub, hub, members):
+                frappe.throw(_("Wait until the hub has applied the removal"))
+
+    def load_locked(self) -> VPNNetwork:
+        """Lock the network, then reload this member from the database with a row lock."""
+        network = VPNNetwork.load_locked()
+        self.flags.for_update = True
+        self.reload()
+        return network
+
+
+def parse(parser, value):
+    try:
+        return parser(value)
+    except (TypeError, ValueError) as error:
+        frappe.throw(str(error))
+
+
+def has_desk_access() -> bool:
+    return bool(frappe.has_permission("VPN Device", "read") or frappe.has_permission("VPN Network", "read"))
 
 
 def check_hub():
-    frappe.get_doc("VPN Network", "default").check_hub()
+    VPNNetwork.load_locked().check_hub()
 
 
 def on_user_change(user, method=None):
-    if frappe.db.table_exists("VPN Network") and frappe.db.exists("VPN Network", "default"):
-        frappe.get_doc("VPN Network", "default").on_user_change(user, method)
-
-
-def after_install():
-    for role in ("VPN Manager", *ROLE_FOR_KIND.values()):
-        if not frappe.db.exists("Role", role):
-            frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 1}).insert()
-    if not frappe.db.exists("VPN Network", "default"):
-        VPNNetwork.save_document(
-            frappe.get_doc({"doctype": "VPN Network", "name": "default", "revision": 0, "__islocal": 1})
-        )
+    if frappe.db.table_exists("VPN Server"):
+        VPNNetwork.load_locked().on_user_change(user, method)

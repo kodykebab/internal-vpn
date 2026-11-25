@@ -1,0 +1,66 @@
+{
+  "doctype": "DocType",
+  "name": "VPN Device",
+  "module": "Internal VPN",
+  "autoname": "hash",
+  "engine": "InnoDB",
+  "field_order": [
+    "label",
+    "public_key",
+    "address",
+    "enabled"
+  ],
+  "fields": [
+    {
+      "fieldname": "label",
+      "label": "Device Name",
+      "fieldtype": "Data",
+      "reqd": 1,
+      "in_list_view": 1,
+      "description": "For example, work laptop"
+    },
+    {
+      "fieldname": "public_key",
+      "label": "WireGuard Public Key",
+      "fieldtype": "Data",
+      "reqd": 1,
+      "unique": 1,
+      "description": "On the device, run: wg genkey | tee vpn.key | wg pubkey"
+    },
+    {
+      "fieldname": "address",
+      "label": "Address",
+      "fieldtype": "Data",
+      "read_only": 1,
+      "unique": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "enabled",
+      "label": "Enabled",
+      "fieldtype": "Check",
+      "default": "1",
+      "in_list_view": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "VPN Engineer",
+      "if_owner": 1,
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    },
+    {
+      "role": "VPN Manager",
+      "read": 1,
+      "write": 1,
+      "delete": 1
+    }
+  ],
+  "title_field": "label",
+  "show_title_field_in_link": 1,
+  "search_fields": "label,address,owner",
+  "track_changes": 1
+}

@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 VPN_RANGE = ipaddress.IPv4Network("100.64.0.0/10")
@@ -132,7 +132,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class ControlPlane:
-    """Calls this host's own VPN Peer methods over HTTPS, without proxies or redirects."""
+    """Calls this host's own VPN Server methods over HTTPS, without proxies or redirects."""
 
     def __init__(self, config: dict):
         url = urlsplit(config["url"])
@@ -152,21 +152,16 @@ class ControlPlane:
         self.opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=context))
 
     def get_configuration(self) -> dict:
-        return self._call("get_configuration")
+        return self._call("get_configuration", {})
 
     def report(self, revision: int, digest: str | None):
         """Report the applied digest, or None when applying failed."""
         self._call("report", {"revision": revision, "success": digest is not None, "digest": digest})
 
-    def _call(self, method: str, args: dict | None = None):
-        payload = {"dt": "VPN Peer", "dn": self.name, "method": method}
-        url, body = self.url, None
-        if args is None:
-            url += "?" + urlencode(payload)
-        else:
-            body = json.dumps({**payload, "args": args}).encode()
+    def _call(self, method: str, args: dict):
+        body = json.dumps({"dt": "VPN Server", "dn": self.name, "method": method, "args": args}).encode()
         headers = {"Authorization": "token " + self.token, "Content-Type": "application/json"}
-        with self.opener.open(Request(url, data=body, headers=headers), timeout=15) as response:
+        with self.opener.open(Request(self.url, data=body, headers=headers), timeout=15) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ValueError("Response too large")

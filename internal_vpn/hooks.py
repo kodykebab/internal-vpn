@@ -10,12 +10,12 @@ add_to_apps_screen = [
         "name": "internal_vpn",
         "title": "Internal VPN",
         "logo": "/assets/frappe/images/frappe-framework-logo.svg",
-        "route": "/desk/vpn-network/default",
+        "route": "/desk/vpn-device",
         "has_permission": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.has_desk_access",
     }
 ]
 
-after_install = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.after_install"
+fixtures = [{"dt": "Role", "filters": [["name", "in", ["VPN Manager", "VPN Engineer", "VPN Host"]]]}]
 auth_hooks = ["internal_vpn.auth.require_login"]
 doc_events = {
     "User": {
@@ -25,8 +25,4 @@ doc_events = {
 }
 scheduler_events = {
     "cron": {"*/5 * * * *": ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.check_hub"]}
-}
-has_permission = {"VPN Peer": "internal_vpn.internal_vpn.doctype.vpn_peer.vpn_peer.has_permission"}
-permission_query_conditions = {
-    "VPN Peer": "internal_vpn.internal_vpn.doctype.vpn_peer.vpn_peer.get_permission_query_conditions"
 }

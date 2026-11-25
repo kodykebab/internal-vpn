@@ -1,0 +1,7 @@
+{
+ "doc_type": "VPN Server",
+ "doctype": "Permission Type",
+ "modified": "2026-11-25 00:00:00.000000",
+ "name": "vpn_server_agent",
+ "perm_type": "agent"
+}

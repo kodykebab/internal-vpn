@@ -1,0 +1,20 @@
+[
+ {
+  "desk_access": 1,
+  "doctype": "Role",
+  "name": "VPN Manager",
+  "role_name": "VPN Manager"
+ },
+ {
+  "desk_access": 1,
+  "doctype": "Role",
+  "name": "VPN Engineer",
+  "role_name": "VPN Engineer"
+ },
+ {
+  "desk_access": 0,
+  "doctype": "Role",
+  "name": "VPN Host",
+  "role_name": "VPN Host"
+ }
+]

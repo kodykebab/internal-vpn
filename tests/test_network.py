@@ -48,17 +48,23 @@ class HubUpdateTests(unittest.TestCase):
 class TopologyTests(unittest.TestCase):
     def setUp(self):
         self.hub = _dict(
-            name="dedicated-hub", public_key=key(1), address="100.100.64.1", endpoint="192.0.2.1:51820"
+            name="dedicated-hub", doctype="VPN Server", public_key=key(1), address="100.100.64.1"
         )
-        self.spoke = _dict(name="atlas", public_key=key(2), address="100.100.64.2")
-        self.device = _dict(name="engineer", public_key=key(3), address="100.100.64.3")
+        self.spoke = _dict(name="atlas", doctype="VPN Server", public_key=key(2), address="100.100.64.2")
+        self.device = _dict(name="engineer", doctype="VPN Device", public_key=key(3), address="100.100.64.3")
         self.members = [self.hub, self.spoke, self.device]
+        self.endpoint = "192.0.2.1:51820"
+
+    def network(self, revision=1):
+        network = VPNNetwork.__new__(VPNNetwork)
+        network.subnet, network.revision, network.hub_endpoint = SUBNET, revision, self.endpoint
+        return network
 
     def configuration(self, peer, members=None, revision=1):
         members = self.members if members is None else members
-        network = VPNNetwork.__new__(VPNNetwork)
-        network.subnet, network.revision = SUBNET, revision
-        return network.build_configuration(peer, self.hub, {member.name: member for member in members})
+        return self.network(revision).build_configuration(
+            peer, self.hub, {member.name: member for member in members}
+        )
 
     def host(self, peer, topology):
         return Host(
@@ -103,8 +109,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(self.configuration(self.device, remaining)["peers"], [])
 
     def test_unrelated_revision_keeps_spoke_current_but_requires_hub_acknowledgement(self):
-        network = VPNNetwork.__new__(VPNNetwork)
-        network.subnet, network.revision = SUBNET, 2
+        network = self.network(revision=2)
         members = {peer.name: peer for peer in self.members}
         for peer in (self.hub, self.spoke):
             peer.apply_success = 1
@@ -117,7 +122,7 @@ class TopologyTests(unittest.TestCase):
 
     def test_hub_endpoint_change_invalidates_spokes(self):
         before = WireGuard.digest(self.configuration(self.spoke))
-        self.hub.endpoint = "192.0.2.4:51820"
+        self.endpoint = "192.0.2.4:51820"
         self.assertNotEqual(before, WireGuard.digest(self.configuration(self.spoke, revision=2)))
 
     def test_spoke_rejects_broad_routes_direct_peers_and_unpinned_hubs(self):

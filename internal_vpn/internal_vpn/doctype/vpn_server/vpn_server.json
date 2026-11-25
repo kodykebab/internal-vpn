@@ -1,17 +1,16 @@
 {
   "doctype": "DocType",
-  "name": "VPN Peer",
+  "name": "VPN Server",
   "module": "Internal VPN",
   "autoname": "hash",
   "engine": "InnoDB",
   "field_order": [
     "label",
-    "kind",
     "user",
     "public_key",
     "address",
-    "endpoint",
     "enabled",
+    "report_section",
     "reported_revision",
     "apply_success",
     "reported_at",
@@ -22,95 +21,77 @@
       "fieldname": "label",
       "label": "Name",
       "fieldtype": "Data",
-      "in_list_view": 1,
-      "read_only": 1
-    },
-    {
-      "fieldname": "kind",
-      "label": "Kind",
-      "fieldtype": "Select",
-      "options": "Service\nDevice",
       "reqd": 1,
-      "read_only": 1
+      "in_list_view": 1
     },
     {
       "fieldname": "user",
-      "label": "User",
+      "label": "Host User",
       "fieldtype": "Link",
       "options": "User",
       "reqd": 1,
-      "read_only": 1
+      "set_only_once": 1,
+      "description": "A dedicated user with the VPN Host role. Its API key authenticates the host agent."
     },
     {
       "fieldname": "public_key",
-      "label": "Public Key",
+      "label": "WireGuard Public Key",
       "fieldtype": "Data",
-      "unique": 1,
       "reqd": 1,
-      "read_only": 1
+      "unique": 1
     },
     {
       "fieldname": "address",
       "label": "Address",
       "fieldtype": "Data",
+      "read_only": 1,
       "unique": 1,
-      "reqd": 1,
-      "read_only": 1
-    },
-    {
-      "fieldname": "endpoint",
-      "label": "Endpoint",
-      "fieldtype": "Data",
-      "read_only": 1
+      "in_list_view": 1
     },
     {
       "fieldname": "enabled",
       "label": "Enabled",
       "fieldtype": "Check",
-      "default": 1,
-      "read_only": 1
+      "default": "1",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "report_section",
+      "label": "Agent Report",
+      "fieldtype": "Section Break"
     },
     {
       "fieldname": "reported_revision",
       "label": "Reported Revision",
       "fieldtype": "Int",
-      "depends_on": "eval:doc.kind=='Service'",
       "read_only": 1
     },
     {
       "fieldname": "apply_success",
-      "label": "Apply Success",
+      "label": "Applied",
       "fieldtype": "Check",
-      "depends_on": "eval:doc.kind=='Service'",
       "read_only": 1
     },
     {
       "fieldname": "reported_at",
       "label": "Reported At",
       "fieldtype": "Datetime",
-      "depends_on": "eval:doc.kind=='Service'",
       "read_only": 1
     },
     {
       "fieldname": "reported_digest",
-      "label": "Reported Configuration Digest",
+      "label": "Reported Digest",
       "fieldtype": "Data",
-      "read_only": 1,
-      "depends_on": "eval:doc.kind=='Service'"
+      "read_only": 1
     }
   ],
   "permissions": [
     {
       "role": "VPN Manager",
-      "read": 1
-    },
-    {
-      "role": "VPN Engineer",
-      "read": 1
-    },
-    {
-      "role": "VPN Host",
-      "read": 1
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
     }
   ],
   "title_field": "label",

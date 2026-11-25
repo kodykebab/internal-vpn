@@ -22,11 +22,19 @@ from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
 
 SITES = os.environ.get("VPN_TEST_SITES_PATH")
 SITE = os.environ.get("VPN_TEST_SITE")
+MODULE = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network"
 MANAGER = "vpn-manager@example.test"
 ENGINEER = "vpn-engineer@example.test"
 OTHER = "vpn-other@example.test"
 HUB = "vpn-hub@example.test"
 SPOKE = "vpn-spoke@example.test"
+ROLES = {
+    MANAGER: "VPN Manager",
+    ENGINEER: "VPN Engineer",
+    OTHER: "VPN Engineer",
+    HUB: "VPN Host",
+    SPOKE: "VPN Host",
+}
 
 
 @unittest.skipUnless(SITES and SITE, "Requires an isolated VPN test site")
@@ -43,13 +51,7 @@ class MembershipTests(unittest.TestCase):
         frappe.connect()
         frappe.set_user("Administrator")
         frappe.flags.mute_emails = True
-        for email, role in (
-            (MANAGER, "VPN Manager"),
-            (ENGINEER, "VPN Engineer"),
-            (OTHER, "VPN Engineer"),
-            (HUB, "VPN Host"),
-            (SPOKE, "VPN Host"),
-        ):
+        for email, role in ROLES.items():
             if not frappe.db.exists("User", email):
                 frappe.get_doc(
                     {
@@ -69,21 +71,29 @@ class MembershipTests(unittest.TestCase):
     def setUp(self):
         frappe.set_user("Administrator")
         frappe.db.rollback()
-        frappe.db.delete("VPN Peer")
-        frappe.db.set_value(
-            "VPN Network", "default", {"hub": None, "subnet": None, "revision": 0, "hub_alert": None}
+        for doctype in ("VPN Device", "VPN Server"):
+            frappe.db.delete(doctype)
+            frappe.db.delete("DocShare", {"share_doctype": doctype})
+        frappe.db.set_single_value(
+            "VPN Network",
+            {
+                "subnet": None,
+                "hub": None,
+                "hub_endpoint": None,
+                "revision": 0,
+                "hub_digest": None,
+                "hub_alert": None,
+            },
         )
         for email in (ENGINEER, OTHER, HUB, SPOKE):
             user = frappe.get_doc("User", email)
             user.enabled = 1
-            user.set("roles", [{"role": "VPN Host" if email in (HUB, SPOKE) else "VPN Engineer"}])
+            user.set("roles", [{"role": ROLES[email]}])
             user.save()
         frappe.db.commit()
-        self.network("initialize", subnet="100.100.64.0/24")
-        self.hub = self.network(
-            "register_service", user=HUB, label="service", public_key=key(1), endpoint="192.0.2.1:51820"
-        )
-        self.network("set_hub", peer=self.hub["name"])
+        self.save_network(subnet="100.100.64.0/24")
+        self.hub = self.server(HUB, key(1))
+        self.save_network(hub=self.hub.name, hub_endpoint="192.0.2.1:51820")
         self.wakeup.reset_mock()
 
     def tearDown(self):
@@ -91,39 +101,79 @@ class MembershipTests(unittest.TestCase):
         frappe.set_user("Administrator")
 
     @staticmethod
-    def call(actor, doctype, name, method, **args):
+    def act(actor, action):
+        """Run one request as `actor`: a fresh transaction, committed like Frappe does after a POST."""
+        frappe.db.rollback()
         frappe.set_user(actor)
-        frappe.local.request = Request.from_values(method="GET" if method.startswith("get_") else "POST")
-        frappe.local.form_dict = frappe._dict()
-        frappe.local.response = frappe._dict(docs=[])
         try:
-            run_doc_method(method, dt=doctype, dn=name, args=args)
-            result = frappe.response.message
+            result = action()
             frappe.db.commit()
             return result
         except Exception:
             frappe.db.rollback()
             raise
 
-    def network(self, method, actor=MANAGER, **args):
-        return self.call(actor, "VPN Network", "default", method, **args)
+    def save_network(self, actor=MANAGER, **values):
+        def save():
+            network = frappe.get_doc("VPN Network")
+            network.update(values)
+            network.save()
+            return network
 
-    def peer(self, name, method, actor=MANAGER, **args):
-        return self.call(actor, "VPN Peer", name, method, **args)
+        return self.act(actor, save)
+
+    def server(self, user, public_key, label="service"):
+        doc = {"doctype": "VPN Server", "label": label, "user": user, "public_key": public_key}
+        return self.act(MANAGER, lambda: frappe.get_doc(doc).insert())
 
     def device(self, public_key=None, actor=ENGINEER):
-        return self.network("register_device", actor=actor, public_key=public_key or key(3), label="laptop")
+        doc = {"doctype": "VPN Device", "label": "laptop", "public_key": public_key or key(3)}
+        return self.act(actor, lambda: frappe.get_doc(doc).insert())
+
+    def update(self, doctype, name, actor=MANAGER, **values):
+        def save():
+            doc = frappe.get_doc(doctype, name)
+            doc.update(values)
+            doc.save()
+            return doc
+
+        return self.act(actor, save)
+
+    def delete(self, doctype, name, actor=MANAGER):
+        self.act(actor, lambda: frappe.delete_doc(doctype, name))
+
+    def call(self, actor, doctype, name, method, http_method="POST", **args):
+        def run():
+            frappe.local.request = Request.from_values(method=http_method)
+            frappe.local.form_dict = frappe._dict()
+            frappe.local.response = frappe._dict(docs=[])
+            run_doc_method(method, dt=doctype, dn=name, args=args)
+            return frappe.response.message
+
+        return self.act(actor, run)
+
+    def hub_configuration(self, actor=HUB):
+        return self.call(actor, "VPN Server", self.hub.name, "get_configuration")
 
     def report_hub(self):
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.peer(
-            self.hub["name"],
+        snapshot = self.hub_configuration()
+        self.call(
+            HUB,
+            "VPN Server",
+            self.hub.name,
             "report",
-            actor=HUB,
             revision=snapshot["revision"],
             success=True,
             digest=WireGuard.digest(snapshot),
         )
+
+    def status(self):
+        return self.call(MANAGER, "VPN Network", "VPN Network", "get_status", http_method="GET")
+
+    @staticmethod
+    def revision():
+        frappe.db.rollback()
+        return frappe.db.get_single_value("VPN Network", "revision")
 
     @contextmanager
     def http(self, **options):
@@ -136,61 +186,64 @@ class MembershipTests(unittest.TestCase):
             frappe.init(SITE, sites_path=SITES)
             frappe.connect()
 
-    def test_hub_endpoint_cannot_be_cleared(self):
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        for endpoint in (None, "", "invalid", "0.0.0.0:1"):
-            with self.subTest(endpoint=endpoint), self.assertRaises(frappe.ValidationError):
-                self.peer(self.hub["name"], "set_endpoint", endpoint=endpoint)
-        self.assertEqual(frappe.db.get_value("VPN Peer", self.hub["name"], "endpoint"), "192.0.2.1:51820")
-        self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
-
-    def test_only_the_hub_endpoint_can_change(self):
-        service = self.network(
-            "register_service", user=SPOKE, label="service", public_key=key(2), endpoint="192.0.2.2:51820"
-        )
-        device = self.device()
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        for name in (service["name"], device["name"]):
-            with self.subTest(name=name), self.assertRaises(frappe.ValidationError):
-                self.peer(name, "set_endpoint", endpoint="192.0.2.3:51820")
-        self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
+    def test_network_settings_are_fixed_once_set_and_validated(self):
+        other = self.server(SPOKE, key(2))
+        revision = self.revision()
+        for values in (
+            {"subnet": "100.100.65.0/24"},
+            {"hub": other.name},
+            {"hub_endpoint": ""},
+            {"hub_endpoint": "invalid"},
+            {"hub_endpoint": "0.0.0.0:1"},
+        ):
+            with self.subTest(values=values), self.assertRaises(frappe.ValidationError):
+                self.save_network(**values)
+        self.assertEqual(frappe.db.get_single_value("VPN Network", "hub_endpoint"), "192.0.2.1:51820")
         self.assertEqual(
-            self.peer(self.hub["name"], "set_endpoint", endpoint="192.0.2.9:51820")["revision"], revision + 1
+            self.save_network(hub_endpoint="[2001:DB8::1]:51820").hub_endpoint, "[2001:db8::1]:51820"
         )
-
-    def test_engineers_register_only_their_own_named_devices(self):
+        self.assertEqual(self.revision(), revision + 1)
         with self.assertRaises(frappe.PermissionError):
-            self.network("register_device", public_key=key(3), label="laptop")
-        with self.assertRaises(TypeError):
-            self.network("register_device", actor=OTHER, user=ENGINEER, public_key=key(3), label="laptop")
-        device = self.network("register_device", actor=OTHER, public_key=key(3), label="laptop")
-        self.assertEqual(
-            frappe.db.get_value("VPN Peer", device["name"], ["user", "label"]), (OTHER, "laptop")
-        )
+            self.save_network(actor=ENGINEER, hub_endpoint="192.0.2.9:51820")
+
+    def test_engineers_own_and_manage_only_their_devices(self):
+        device = self.device()
+        self.assertEqual(frappe.db.get_value("VPN Device", device.name, "owner"), ENGINEER)
+        with self.assertRaises(frappe.PermissionError):
+            self.device(key(4), actor=MANAGER)
         with self.assertRaises(frappe.ValidationError):
-            self.network("register_device", actor=ENGINEER, public_key=key(4), label=" ")
+            self.update("VPN Device", device.name, actor=ENGINEER, label="")
+        for action in (
+            lambda: self.update("VPN Device", device.name, actor=OTHER, enabled=0),
+            lambda: self.delete("VPN Device", device.name, actor=OTHER),
+            lambda: self.call(OTHER, "VPN Device", device.name, "get_configuration", http_method="GET"),
+            lambda: self.call(ENGINEER, "VPN Network", "VPN Network", "get_status", http_method="GET"),
+        ):
+            with self.assertRaises(frappe.PermissionError):
+                action()
+        self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(5))
+        self.assertEqual(frappe.db.get_value("VPN Device", device.name, "public_key"), key(5))
 
     def test_managers_add_engineers(self):
         email = f"vpn-added-{frappe.generate_hash(length=8)}@example.test"
         with self.assertRaises(frappe.PermissionError):
-            self.network("add_engineer", actor=ENGINEER, email=email, first_name="Added")
-        added = self.network("add_engineer", email=email, first_name="Added")
+            self.call(ENGINEER, "VPN Network", "VPN Network", "add_engineer", email=email, first_name="Added")
+        added = self.call(
+            MANAGER, "VPN Network", "VPN Network", "add_engineer", email=email, first_name="Added"
+        )
         self.assertEqual(check_password(email, added["password"]), email)
         self.assertIn("VPN Engineer", frappe.get_roles(email))
         self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
-        self.assertTrue(
-            self.network("register_device", actor=email, public_key=key(4), label="laptop")["name"]
+        self.assertTrue(self.device(key(4), actor=email).name)
+        self.assertIsNone(
+            self.call(MANAGER, "VPN Network", "VPN Network", "add_engineer", email=HUB)["password"]
         )
-        self.assertIsNone(self.network("add_engineer", email=HUB)["password"])
         self.assertTrue({"VPN Host", "VPN Engineer"} <= set(frappe.get_roles(HUB)))
-        with patch.dict(frappe.conf, {"internal_vpn_invite_email": 1}):
-            emailed = f"vpn-emailed-{frappe.generate_hash(length=8)}@example.test"
-            self.assertIsNone(self.network("add_engineer", email=emailed, first_name="Emailed")["password"])
 
     def test_hub_wakeup_waits_for_commit_and_is_discarded_on_rollback(self):
         for commit in (False, True):
             frappe.set_user(ENGINEER)
-            frappe.get_doc("VPN Network", "default").register_device(key(3), "laptop")
+            frappe.get_doc({"doctype": "VPN Device", "label": "laptop", "public_key": key(3)}).insert()
             self.wakeup.assert_not_called()
             if commit:
                 frappe.db.commit()
@@ -199,114 +252,67 @@ class MembershipTests(unittest.TestCase):
                 self.wakeup.assert_not_called()
         self.wakeup.assert_called_once_with()
 
-    def test_capacity_reserves_disabled_members_and_release_frees_it(self):
-        with patch("internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.MAX_PEERS", 1):
+    def test_capacity_reserves_disabled_members_and_delete_frees_it(self):
+        with patch(f"{MODULE}.MAX_PEERS", 1):
             device = self.device()
-            self.peer(device["name"], "set_enabled", enabled=0)
+            self.update("VPN Device", device.name, enabled=0)
             with self.assertRaises(frappe.ValidationError):
                 self.device(key(4))
             self.report_hub()
-            self.peer(device["name"], "release")
-            replacement = self.device(key(4))
-            self.assertEqual(replacement["address"], device["address"])
+            self.delete("VPN Device", device.name, actor=ENGINEER)
+            self.assertEqual(self.device(key(4)).address, device.address)
 
-    def test_release_waits_for_hub_and_reserves_address(self):
+    def test_delete_waits_for_hub_and_reserves_address(self):
         device = self.device()
         self.report_hub()
-        self.peer(device["name"], "set_enabled", enabled=0)
         with self.assertRaises(frappe.ValidationError):
-            self.peer(device["name"], "release")
-        other = self.device(key(4))
-        self.assertNotEqual(other["address"], device["address"])
+            self.delete("VPN Device", device.name)
+        self.update("VPN Device", device.name, enabled=0)
+        with self.assertRaises(frappe.ValidationError):
+            self.delete("VPN Device", device.name)
+        self.assertNotEqual(self.device(key(4)).address, device.address)
         self.report_hub()
-        self.peer(device["name"], "release")
-        self.assertEqual(self.device(key(5))["address"], device["address"])
+        self.delete("VPN Device", device.name)
+        self.assertEqual(self.device(key(5)).address, device.address)
 
-    def test_release_requires_fresh_report_when_membership_returns_to_old_digest(self):
+    def test_delete_requires_fresh_report_when_membership_returns_to_old_digest(self):
         device = self.device()
-        self.peer(device["name"], "set_enabled", enabled=0)
+        self.update("VPN Device", device.name, enabled=0)
         self.report_hub()
-        self.peer(device["name"], "set_enabled", enabled=1)
+        self.update("VPN Device", device.name, enabled=1)
         # The hub may apply this configuration without successfully reporting it.
-        self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.peer(device["name"], "set_enabled", enabled=0)
-        self.assertFalse(self.network("get_status")["hub_current"])
+        self.hub_configuration()
+        self.update("VPN Device", device.name, enabled=0)
+        self.assertFalse(self.status()["hub_current"])
         with self.assertRaises(frappe.ValidationError):
-            self.peer(device["name"], "release")
+            self.delete("VPN Device", device.name)
         self.report_hub()
-        self.assertTrue(self.network("get_status")["hub_current"])
-        self.peer(device["name"], "release")
-        self.assertEqual(self.device(key(4))["address"], device["address"])
+        self.assertTrue(self.status()["hub_current"])
+        self.delete("VPN Device", device.name)
 
-    def test_owners_cannot_read_or_mutate_other_peers(self):
-        device = self.device()
-        for method, args in (
-            ("get_configuration", {}),
-            ("set_enabled", {"enabled": 0}),
-            ("rotate_key", {"public_key": key(4)}),
-            ("release", {}),
-        ):
-            with self.subTest(method=method), self.assertRaises(frappe.PermissionError):
-                self.peer(device["name"], method, actor=OTHER, **args)
-        with self.assertRaises(frappe.PermissionError):
-            self.network("get_status", actor=ENGINEER)
-        with self.assertRaises(frappe.PermissionError):
-            self.peer(self.hub["name"], "get_configuration", actor=MANAGER)
-
-    def test_administrator_cannot_bypass_membership_actions(self):
-        device = self.device()
-        frappe.set_user("Administrator")
-        for doctype, name, field, value in (
-            ("VPN Peer", device["name"], "enabled", 0),
-            ("VPN Peer", device["name"], "address", "100.100.64.99"),
-            ("VPN Network", "default", "revision", 999),
-        ):
-            doc = frappe.get_doc(doctype, name)
-            doc.set(field, value)
-            doc.flags.update(ignore_validate=True, vpn_action=True)
-            with self.subTest(doctype=doctype, field=field), self.assertRaises(frappe.ValidationError):
-                doc.save()
-            frappe.db.rollback()
-            with self.assertRaises(frappe.ValidationError):
-                frappe.rename_doc(doctype, name, name + "-renamed", force=True)
-            frappe.db.rollback()
+    def test_hub_cannot_be_disabled_or_deleted(self):
         with self.assertRaises(frappe.ValidationError):
-            frappe.get_doc(
-                {
-                    "doctype": "VPN Peer",
-                    "kind": "Device",
-                    "user": ENGINEER,
-                    "public_key": key(8),
-                    "address": "100.100.64.99",
-                }
-            ).insert()
-        frappe.db.rollback()
+            self.update("VPN Server", self.hub.name, enabled=0)
         with self.assertRaises(frappe.ValidationError):
-            frappe.delete_doc("VPN Network", "default", force=True)
-        frappe.db.rollback()
+            self.delete("VPN Server", self.hub.name)
 
-    def test_released_peer_cannot_be_restored_generically(self):
-        from frappe.core.doctype.deleted_document.deleted_document import restore
-
+    def test_system_fields_keep_their_values(self):
         device = self.device()
-        self.peer(device["name"], "set_enabled", enabled=0)
         self.report_hub()
-        self.peer(device["name"], "release")
-        frappe.set_user("Administrator")
-        deleted = frappe.db.get_value("Deleted Document", {"deleted_name": device["name"]}, "name")
-        self.assertTrue(deleted)
-        with self.assertRaises(frappe.ValidationError):
-            restore(deleted)
-        frappe.db.rollback()
-        self.assertFalse(frappe.db.exists("VPN Peer", device["name"]))
+        revision = self.revision()
+        self.update("VPN Device", device.name, address="100.100.64.99")
+        self.update("VPN Server", self.hub.name, reported_revision=999, apply_success=0)
+        self.save_network(revision=999, hub_digest="forged")
+        self.assertEqual(frappe.db.get_value("VPN Device", device.name, "address"), device.address)
+        self.assertEqual(frappe.db.get_value("VPN Server", self.hub.name, "reported_revision"), revision)
+        self.assertEqual(self.revision(), revision)
+        self.assertTrue(self.status()["hub_current"])
 
     def test_membership_edits_use_native_versions_but_reports_do_not(self):
         device = self.device()
-        self.peer(device["name"], "rotate_key", actor=ENGINEER, public_key=key(4))
+        self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(4))
         versions = frappe.get_all(
-            "Version",
-            filters={"ref_doctype": "VPN Peer", "docname": device["name"]},
-            fields=["owner", "data"],
+            "Version", filters={"ref_doctype": "VPN Device", "docname": device.name}, fields=["owner", "data"]
         )
         self.assertTrue(
             any(
@@ -314,128 +320,131 @@ class MembershipTests(unittest.TestCase):
                 for v in versions
             )
         )
-        self.assertTrue(frappe.db.exists("Version", {"ref_doctype": "VPN Network", "docname": "default"}))
         count = frappe.db.count("Version")
         self.report_hub()
         self.assertEqual(frappe.db.count("Version"), count)
 
-    def test_unchanged_actions_do_not_write_or_wake_hub(self):
+    def test_unchanged_saves_do_not_advance_revision_or_wake_hub(self):
         device = self.device()
         self.report_hub()
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        count = frappe.db.count("Version")
+        revision = self.revision()
         self.wakeup.reset_mock()
-        for name, method, args in (
-            (device["name"], "set_enabled", {"enabled": 1}),
-            (device["name"], "rotate_key", {"public_key": key(3)}),
-            (self.hub["name"], "set_endpoint", {"endpoint": "192.0.2.1:051820"}),
-        ):
-            self.assertEqual(self.peer(name, method, **args)["revision"], revision)
-        self.assertEqual(frappe.db.count("Version"), count)
+        self.update("VPN Device", device.name, actor=ENGINEER, label="work laptop")
+        self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(3))
+        self.save_network(hub_endpoint="192.0.2.1:051820")
+        self.assertEqual(self.revision(), revision)
         self.wakeup.assert_not_called()
-        self.assertTrue(self.network("get_status")["hub_current"])
+        self.assertTrue(self.status()["hub_current"])
 
     def test_spoke_lookup_is_bounded_and_matches_full_snapshot(self):
-        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
+        service = self.server(SPOKE, key(2))
         self.device()
-        network = frappe.get_doc("VPN Network", "default").lock()
-        peer = frappe.get_doc("VPN Peer", service["name"])
-        full = network.build_configuration(peer, *network.get_membership())
-        with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as query:
-            hub, members = network.get_membership(peer)
-        self.assertEqual(set(members), {self.hub["name"], service["name"]})
-        self.assertEqual(query.call_args.args[1]["names"], (self.hub["name"], service["name"]))
-        self.assertEqual(network.build_configuration(peer, hub, members), full)
+        frappe.set_user("Administrator")
+        network = VPNNetwork.load_locked()
+        full = network.build_configuration(service, *network.get_membership())
+        with patch.object(VPNNetwork, "query_members", wraps=VPNNetwork.query_members) as query:
+            hub, members = network.get_membership(service)
+        self.assertEqual(set(members), {self.hub.name, service.name})
+        self.assertTrue(all(call.args[2] == [self.hub.name, service.name] for call in query.call_args_list))
+        self.assertEqual(network.build_configuration(service, hub, members), full)
         frappe.db.rollback()
-        self.peer(service["name"], "set_enabled", enabled=0)
-        self.assertEqual(self.peer(service["name"], "get_configuration", actor=SPOKE)["peers"], [])
+        self.update("VPN Server", service.name, enabled=0)
+        self.assertEqual(self.call(SPOKE, "VPN Server", service.name, "get_configuration")["peers"], [])
 
     def test_manual_recovery_advances_past_preserved_watermarks(self):
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        snapshot = self.hub_configuration()
         highest_observed_revision = snapshot["revision"] + 10
         with tempfile.TemporaryDirectory() as directory:
             watermark = Path(directory) / "revision.json"
             Host.accept_revision(watermark, highest_observed_revision, "previous-state")
             with self.assertRaises(ValueError):
                 Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
-            frappe.set_user("Administrator")
-            network = frappe.get_doc("VPN Network", "default").lock()
-            network.revision = max(network.revision, highest_observed_revision)
-            network.advance_revision()
-            frappe.db.commit()
-            recovered = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+
+            def recover():
+                network = VPNNetwork.load_locked()
+                network.revision = max(network.revision, highest_observed_revision)
+                network.advance_revision()
+
+            self.act("Administrator", recover)
+            recovered = self.hub_configuration()
             self.assertEqual(recovered["revision"], highest_observed_revision + 1)
             Host.accept_revision(watermark, recovered["revision"], WireGuard.digest(recovered))
             with self.assertRaises(ValueError):
                 Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
         self.report_hub()
-        self.assertTrue(self.network("get_status")["hub_current"])
+        self.assertTrue(self.status()["hub_current"])
 
     def test_polling_and_revocation_leave_consistent_snapshots(self):
-        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
+        service = self.server(SPOKE, key(2))
         device = self.device()
         barrier = Barrier(3)
 
         def poll(actor, name):
             frappe.init(SITE, sites_path=SITES)
             frappe.connect()
+            snapshots = []
             try:
                 barrier.wait(timeout=10)
-                return [self.peer(name, "get_configuration", actor=actor) for _ in range(8)]
+                for _ in range(8):
+                    # A conflicting change makes a poll fail; the host retries on its next run.
+                    try:
+                        snapshots.append(self.call(actor, "VPN Server", name, "get_configuration"))
+                    except frappe.QueryDeadlockError:
+                        pass
+                return snapshots
             finally:
                 frappe.destroy()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            hub_reads = pool.submit(poll, HUB, self.hub["name"])
-            spoke_reads = pool.submit(poll, SPOKE, service["name"])
+            hub_reads = pool.submit(poll, HUB, self.hub.name)
+            spoke_reads = pool.submit(poll, SPOKE, service.name)
             barrier.wait(timeout=10)
-            self.peer(device["name"], "set_enabled", enabled=0)
-            revision = frappe.db.get_value("VPN Network", "default", "revision")
+            self.retry(lambda: self.update("VPN Device", device.name, enabled=0))
+            revision = self.revision()
             for snapshot in hub_reads.result(timeout=20):
                 if snapshot["revision"] >= revision:
-                    self.assertNotIn(device["address"], [p["address"] for p in snapshot["peers"]])
+                    self.assertNotIn(device.address, [p["address"] for p in snapshot["peers"]])
             for snapshot in spoke_reads.result(timeout=20):
                 self.assertEqual(len(snapshot["peers"]), 1)
-        final = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertNotIn(device["address"], [p["address"] for p in final["peers"]])
+        self.assertNotIn(device.address, [p["address"] for p in self.hub_configuration()["peers"]])
 
-    def test_generic_writes_are_denied(self):
+    def test_service_credentials_are_scoped(self):
+        service = self.server(SPOKE, key(2))
+        self.assertEqual(
+            self.call(SPOKE, "VPN Server", service.name, "get_configuration")["topology"], "spoke"
+        )
+        for action in (
+            lambda: self.call(SPOKE, "VPN Server", self.hub.name, "get_configuration"),
+            lambda: self.call(MANAGER, "VPN Server", self.hub.name, "get_configuration"),
+            lambda: self.update("VPN Server", service.name, actor=SPOKE, public_key=key(4)),
+        ):
+            with self.assertRaises(frappe.PermissionError):
+                action()
+        for user in (SPOKE, ENGINEER):
+            with self.subTest(user=user), self.assertRaises(frappe.ValidationError):
+                self.server(user, key(4))
+
+    def test_keys_are_unique_across_servers_and_devices(self):
         device = self.device()
-        for actor in (MANAGER, ENGINEER):
-            frappe.set_user(actor)
-            peer = frappe.get_doc("VPN Peer", device["name"])
-            peer.enabled = 0
-            with self.subTest(actor=actor), self.assertRaises(frappe.PermissionError):
-                peer.save()
-            frappe.db.rollback()
-
-    def test_service_credentials_are_scoped_and_cannot_edit_membership(self):
-        service = self.network("register_service", user=SPOKE, label="service", public_key=key(2))
-        snapshot = self.peer(service["name"], "get_configuration", actor=SPOKE)
-        self.assertEqual(snapshot["topology"], "spoke")
-        with self.assertRaises(frappe.PermissionError):
-            self.peer(self.hub["name"], "get_configuration", actor=SPOKE)
-        with self.assertRaises(frappe.PermissionError):
-            self.peer(service["name"], "rotate_key", actor=SPOKE, public_key=key(4))
-        with self.assertRaises(frappe.ValidationError):
-            self.network("register_service", user=SPOKE, label="service", public_key=key(4))
-
-    def test_duplicate_key_rolls_back_membership(self):
-        device = self.device()
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        with self.assertRaises(frappe.UniqueValidationError):
-            self.device()
-        self.assertEqual(frappe.db.count("VPN Peer"), 2)
-        self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), revision)
-        self.assertEqual(frappe.db.get_value("VPN Peer", device["name"], "public_key"), key(3))
+        revision = self.revision()
+        for action in (
+            lambda: self.device(),
+            lambda: self.device(key(1)),
+            lambda: self.server(SPOKE, key(3)),
+        ):
+            with self.assertRaises(frappe.UniqueValidationError):
+                action()
+        self.assertEqual(frappe.db.count("VPN Device") + frappe.db.count("VPN Server"), 2)
+        self.assertEqual(self.revision(), revision)
+        self.assertEqual(frappe.db.get_value("VPN Device", device.name, "public_key"), key(3))
 
     def test_reports_reject_future_and_out_of_order_revisions(self):
         self.report_hub()
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        for value in (revision - 1, revision + 1, True):
+        revision = self.revision()
+        for value in (revision - 1, revision + 1):
             with self.subTest(revision=value), self.assertRaises(frappe.ValidationError):
-                self.peer(self.hub["name"], "report", actor=HUB, revision=value, success=False)
-        self.assertTrue(self.network("get_status")["hub_current"])
+                self.call(HUB, "VPN Server", self.hub.name, "report", revision=value, success=False)
+        self.assertTrue(self.status()["hub_current"])
 
     def test_http_host_authentication_and_method_restrictions(self):
         frappe.set_user("Administrator")
@@ -445,12 +454,14 @@ class MembershipTests(unittest.TestCase):
         headers = {"Authorization": f"token {user.api_key}:{user.api_secret}"}
         user.save()
         frappe.db.commit()
-        payload = {"dt": "VPN Peer", "dn": self.hub["name"], "method": "get_configuration"}
+        path = "/api/method/run_doc_method"
+        payload = {"dt": "VPN Server", "dn": self.hub.name, "method": "get_configuration", "args": {}}
         with self.http() as client:
-            path = "/api/method/run_doc_method"
-            with client.get(path, query_string=payload) as response:
+            with client.post(path, json=payload) as response:
                 self.assertEqual(response.status_code, 401)
-            with client.get(path, query_string=payload, headers=headers) as response:
+            with client.get(path, query_string={**payload, "args": "{}"}, headers=headers) as response:
+                self.assertEqual(response.status_code, 403)
+            with client.post(path, json=payload, headers=headers) as response:
                 self.assertEqual(response.status_code, 200)
                 snapshot = response.get_json()["message"]
             payload.update(
@@ -464,16 +475,6 @@ class MembershipTests(unittest.TestCase):
             with client.post(path, json=payload, headers=headers) as response:
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.get_json()["message"]["accepted"])
-            with client.get(
-                path,
-                query_string={
-                    "dt": "VPN Peer",
-                    "dn": self.hub["name"],
-                    "method": "report",
-                },
-                headers=headers,
-            ) as response:
-                self.assertEqual(response.status_code, 403)
 
     def test_desktop_entry_is_scoped_to_vpn_desk_roles(self):
         from frappe.apps import get_apps
@@ -485,7 +486,7 @@ class MembershipTests(unittest.TestCase):
                 apps = {app["name"]: app for app in get_apps()}
                 self.assertEqual("internal_vpn" in apps, allowed)
                 if allowed:
-                    self.assertEqual(apps["internal_vpn"]["route"], "/desk/vpn-network/default")
+                    self.assertEqual(apps["internal_vpn"]["route"], "/desk/vpn-device")
 
     def test_guest_page_assets_do_not_allow_other_commands(self):
         with self.http(use_cookies=False) as client:
@@ -498,7 +499,7 @@ class MembershipTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                 with client.get(path, query_string={"cmd": "frappe.client.get_list"}) as response:
                     self.assertEqual(response.status_code, 401)
-            with client.get("/api/resource/VPN Peer") as response:
+            with client.get("/api/resource/VPN Device") as response:
                 self.assertEqual(response.status_code, 401)
             with client.post("/website_script.js") as response:
                 self.assertEqual(response.status_code, 401)
@@ -538,42 +539,39 @@ class MembershipTests(unittest.TestCase):
     def test_owner_eligibility_changes_membership_and_revision(self):
         device = self.device()
         self.report_hub()
-        revision = frappe.db.get_value("VPN Network", "default", "revision")
-        frappe.set_user("Administrator")
-        owner = frappe.get_doc("User", ENGINEER)
-        owner.enabled = 0
-        owner.save()
-        frappe.db.commit()
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        revision = self.revision()
+        self.update("User", ENGINEER, actor="Administrator", enabled=0)
+        snapshot = self.hub_configuration()
         self.assertGreater(snapshot["revision"], revision)
-        self.assertNotIn(device["address"], [peer["address"] for peer in snapshot["peers"]])
-        self.assertFalse(self.network("get_status")["hub_current"])
+        self.assertNotIn(device.address, [peer["address"] for peer in snapshot["peers"]])
+        self.assertFalse(self.status()["hub_current"])
 
     def test_owner_change_without_hooks_advances_hub_revision(self):
         device = self.device()
-        first = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertEqual(self.peer(self.hub["name"], "get_configuration", actor=HUB), first)
+        first = self.hub_configuration()
+        self.assertEqual(self.hub_configuration(), first)
         frappe.db.set_value("User", ENGINEER, "enabled", 0)
         frappe.db.commit()
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
+        snapshot = self.hub_configuration()
         self.assertEqual(snapshot["revision"], first["revision"] + 1)
-        self.assertNotIn(device["address"], [peer["address"] for peer in snapshot["peers"]])
-        self.assertEqual(self.peer(self.hub["name"], "get_configuration", actor=HUB), snapshot)
+        self.assertNotIn(device.address, [peer["address"] for peer in snapshot["peers"]])
+        self.assertEqual(self.hub_configuration(), snapshot)
         with tempfile.TemporaryDirectory() as directory:
             watermark = Path(directory) / "revision.json"
             Host.accept_revision(watermark, first["revision"], WireGuard.digest(first))
             Host.accept_revision(watermark, snapshot["revision"], WireGuard.digest(snapshot))
 
     def test_hub_alerts_notify_once_per_problem_and_on_recovery(self):
-        module = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network"
-
         def check(at=None):
-            frappe.set_user("Administrator")  # as the scheduler runs jobs
-            with patch(f"{module}.now_datetime", return_value=at or now_datetime()):
-                frappe.get_doc("VPN Network", "default").check_hub()
+            def run():
+                with patch(f"{MODULE}.now_datetime", return_value=at or now_datetime()):
+                    VPNNetwork.load_locked().check_hub()
+
+            # As the scheduler runs jobs.
+            self.act("Administrator", run)
             return [call.args[1]["subject"] for call in notify.call_args_list]
 
-        with patch(f"{module}.enqueue_create_notification") as notify:
+        with patch(f"{MODULE}.enqueue_create_notification") as notify:
             self.assertEqual(check(add_to_date(now_datetime(), minutes=10)), [])
             with patch.dict(frappe.conf, {"internal_vpn_hub_alert_minutes": 5}):
                 later = add_to_date(now_datetime(), minutes=10)
@@ -583,91 +581,41 @@ class MembershipTests(unittest.TestCase):
                 self.report_hub()
                 self.assertEqual(check()[-1], "Resolved: The VPN hub has stopped reporting")
                 self.device()
-                frappe.db.set_value(
-                    "VPN Network",
-                    "default",
-                    "modified",
-                    add_to_date(now_datetime(), minutes=-10),
-                    update_modified=False,
+                frappe.db.set_single_value(
+                    "VPN Network", "modified", add_to_date(now_datetime(), minutes=-10), update_modified=False
                 )
+                frappe.db.commit()
                 self.assertEqual(check()[-1], "The VPN hub has not applied the latest membership")
 
-    def test_status_marks_hosts_stale_and_accepts_ipv6_hub_endpoint(self):
-        self.peer(self.hub["name"], "set_endpoint", endpoint="[2001:DB8::1]:51820")
-        self.assertEqual(frappe.db.get_value("VPN Peer", self.hub["name"], "endpoint"), "[2001:db8::1]:51820")
+    def test_status_marks_hosts_stale(self):
         self.report_hub()
-        frappe.set_user(MANAGER)
-        status = frappe.get_doc("VPN Network", "default").get_status()
-        self.assertTrue(status["all_current"])
-        later = add_to_date(now_datetime(), minutes=10)
-        with patch(
-            "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.now_datetime", return_value=later
-        ):
-            status = frappe.get_doc("VPN Network", "default").get_status()
-        hub = next(host for host in status["hosts"] if host["name"] == self.hub["name"])
+        self.assertTrue(self.status()["all_current"])
+        with patch(f"{MODULE}.now_datetime", return_value=add_to_date(now_datetime(), minutes=10)):
+            status = self.status()
+        hub = next(host for host in status["hosts"] if host["name"] == self.hub.name)
         self.assertTrue(hub["current"] and hub["stale"])
         self.assertFalse(status["all_current"])
 
     def test_hub_snapshot_lists_servers_and_spokes_get_no_rules(self):
-        service = self.network("register_service", user=SPOKE, public_key=key(2), label="service")
+        service = self.server(SPOKE, key(2))
         self.device()
-        hub = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertEqual(hub["access"], {"services": [service["address"]]})
-        self.assertIsNone(self.peer(service["name"], "get_configuration", actor=SPOKE)["access"])
+        self.assertEqual(self.hub_configuration()["access"], {"services": [service.address]})
+        self.assertIsNone(self.call(SPOKE, "VPN Server", service.name, "get_configuration")["access"])
 
     def test_hub_owner_must_keep_role_and_enablement(self):
-        for change in ("enabled", "roles"):
-            frappe.set_user("Administrator")
-            owner = frappe.get_doc("User", HUB)
-            owner.set(change, 0 if change == "enabled" else [])
-            with self.subTest(change=change), self.assertRaises(frappe.ValidationError):
-                owner.save()
-            frappe.db.rollback()
+        for values in ({"enabled": 0}, {"roles": []}):
+            with self.subTest(values=values), self.assertRaises(frappe.ValidationError):
+                self.update("User", HUB, actor="Administrator", **values)
 
     def test_role_removal_revokes_device_membership(self):
         self.device()
-        frappe.set_user("Administrator")
-        owner = frappe.get_doc("User", ENGINEER)
-        owner.set("roles", [])
-        owner.save()
-        frappe.db.commit()
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertEqual(snapshot["peers"], [])
+        self.update("User", ENGINEER, actor="Administrator", roles=[])
+        self.assertEqual(self.hub_configuration()["peers"], [])
         with self.assertRaises(frappe.PermissionError):
             self.device(key(4))
 
-    def test_owner_save_conflict_rolls_back_and_can_be_retried(self):
-        self.device()
-        frappe.set_user("Administrator")
-        owner = frappe.get_doc("User", ENGINEER)
-        frappe.get_doc("VPN Network", "default")
-
-        def register():
-            frappe.init(SITE, sites_path=SITES)
-            frappe.connect()
-            try:
-                return self.device(key(4))
-            finally:
-                frappe.destroy()
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            peer = pool.submit(register).result(timeout=15)
-        owner.enabled = 0
-        try:
-            owner.save()
-        except frappe.QueryDeadlockError:
-            frappe.db.rollback()
-            owner = frappe.get_doc("User", ENGINEER)
-            self.assertEqual(owner.enabled, 1)
-            self.assertEqual(frappe.db.get_value("VPN Network", "default", "revision"), peer["revision"])
-            owner.enabled = 0
-            owner.save()
-        frappe.db.commit()
-        snapshot = self.peer(self.hub["name"], "get_configuration", actor=HUB)
-        self.assertGreater(snapshot["revision"], peer["revision"])
-        self.assertEqual(snapshot["peers"], [])
-
     def test_concurrent_registration_allocates_distinct_addresses_and_revisions(self):
+        revision = self.revision()
         barrier = Barrier(4)
 
         def register(number):
@@ -675,11 +623,21 @@ class MembershipTests(unittest.TestCase):
             frappe.connect()
             try:
                 barrier.wait(timeout=10)
-                return self.device(key(number))
+                return self.retry(lambda: self.device(key(number)))
             finally:
                 frappe.destroy()
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             devices = list(pool.map(register, range(10, 14)))
-        self.assertEqual(len({device["address"] for device in devices}), 4)
-        self.assertEqual(len({device["revision"] for device in devices}), 4)
+        self.assertEqual(len({device.address for device in devices}), 4)
+        self.assertEqual(self.revision(), revision + 4)
+
+    @staticmethod
+    def retry(action, attempts=5):
+        """Retry a request that lost a conflict, as a user or host would."""
+        for attempt in range(attempts):
+            try:
+                return action()
+            except frappe.QueryDeadlockError:
+                if attempt == attempts - 1:
+                    raise

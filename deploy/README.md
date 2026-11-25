@@ -37,7 +37,7 @@ Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 
 | Field | Value |
 | --- | --- |
-| `name` | VPN Peer name |
+| `name` | VPN Server name |
 | `address`, `subnet`, `public_key` | From registration |
 | `interface` | `ivpn0` |
 | `topology` | `hub` or `spoke` |
@@ -77,19 +77,19 @@ The firewall loads before `ivpn0` and the agent. It blocks hub services from mem
 
 ## Bring up
 
-1. Initialize the subnet.
-2. Register the hub service with its endpoint, set up its host, then **Set Hub**.
-3. Register each spoke service and set up its host.
+1. In **VPN Network**, set the subnet.
+2. Create a VPN Server for the hub and set up its host. In **VPN Network**, set **Hub** and **Hub Endpoint**.
+3. Create a VPN Server for each spoke and set up its host.
 
 ## Operate
 
 | Task | Steps |
 | --- | --- |
-| Add an engineer | Manager: **Add Engineer**, then hand over the initial password. Engineer: log in, **Register Device**, import the configuration. |
-| Disable a device | **Disable**. Status shows the hub Current once applied. |
+| Add an engineer | Manager: **Add Engineer** on VPN Network, then hand over the initial password. Engineer: log in, create a VPN Device, import the configuration it shows. |
+| Disable a member | Clear **Enabled**. Status shows the hub Current once applied. |
 | Revoke a user | Disable the user or remove their VPN role. |
-| Free an address | **Release** a disabled peer after the hub has applied the removal. |
-| Rotate a key | **Rotate Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
+| Free an address | Delete a disabled member after the hub has applied the change. |
+| Rotate a key | Change **WireGuard Public Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
 | Rotate a host token | Change the user's API secret and `token` in `host.json`. |
 
 Agent errors print a `stage` without details. Read them in the unit journal. A failed apply is retried on the next run. Stopping the timer keeps the current peers.
@@ -109,11 +109,12 @@ All are off by default.
 
 1. Stop the updater on every host and pause changes. Keep VPN traffic isolated: the backup may miss revocations.
 2. Note the highest revision in any host's `/var/lib/internal-vpn/revision.json`. Keep hosts without one isolated until reprovisioned.
-3. Fix owners, keys and enablement with VPN actions. Reapply missing revocations. Do not restore released peers from Deleted Document.
+3. Fix owners, keys and enablement in the VPN forms. Reapply missing revocations.
 4. Raise the revision above that maximum in `bench --site <site> console`:
 
     ```python
-    network = frappe.get_doc("VPN Network", "default").lock()
+    from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
+    network = VPNNetwork.load_locked()
     network.revision = max(network.revision, highest_observed_revision)
     network.advance_revision()
     frappe.db.commit()

@@ -17,23 +17,24 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 
 | Path | Purpose |
 | --- | --- |
-| `internal_vpn/internal_vpn/doctype/vpn_network` | The network: addresses, revisions, hub, status, alerts, user hooks |
-| `internal_vpn/internal_vpn/doctype/vpn_peer` | One service or device: key, endpoint, enablement, configuration, reports |
+| `internal_vpn/internal_vpn/doctype/vpn_network` | The network settings (Single): subnet, hub, revisions, status, alerts, user hooks. Shared member rules |
+| `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports |
+| `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
 | `internal_vpn/auth.py` | Blocks guests except login and password pages |
 | `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |
 
 ## Roles
 
-In Desk, **Internal VPN** opens the network. Form buttons call whitelisted DocType methods. Hosts call the same methods through `run_doc_method`.
+In Desk, **Internal VPN** opens the device list. Servers and devices use the standard forms: create, edit the key or **Enabled**, delete. The controllers allocate addresses, enforce the hub rules and advance the revision. Hosts call `get_configuration` and `report` on their VPN Server through `run_doc_method`.
 
 | Role | Can |
 | --- | --- |
-| VPN Manager | Initialize, register services, add engineers, set the hub, view status. Disable, rotate or release any peer |
-| VPN Engineer | Register, view, disable, rotate and release their own devices |
-| VPN Host | Fetch its configuration and report back. One user per host |
+| VPN Manager | Edit the network settings, add engineers, view status. Create, edit and delete servers. Edit and delete any device |
+| VPN Engineer | Create, edit and delete their own devices |
+| VPN Host | Fetch its server's configuration and report back, through the `agent` right on its shared VPN Server. One user per server |
 
-No role can edit VPN records directly. The network holds one hub and up to 10,000 other peers.
+A member keeps its address until deleted, and can be deleted only when disabled and after the hub has applied that. The network holds one hub and up to 10,000 other members.
 
 The hub enforces who reaches whom: servers reach each other, members reach servers, and nothing on the VPN can open a connection to a device.
 

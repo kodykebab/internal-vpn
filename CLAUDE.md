@@ -10,7 +10,8 @@ Read [README.md](README.md) first. Adapted from the Pilot and Atlas guides.
 - Keep the code short and clear. Do not add helpers, wrappers or fallbacks without a real need.
 - Reuse existing patterns and keep one owner for mutable state. Delete before adding.
 - Keep permissions, validation, synchronization and cleanup when simplifying. Fail near the cause; retry only safe operations.
-- Lock the network before reading or changing membership. `lock()` commits first; write nothing before it. User hooks use `new_transaction=False` to keep the User transaction.
+- Lock the network before reading or changing membership: `VPNNetwork.load_locked()`, then the member. Do not commit by hand; a conflicting change fails with `QueryDeadlockError` and can be retried.
+- Use Frappe APIs and hooks over our own mechanisms, and the query builder instead of raw SQL.
 - Keep comments and docstrings short. Do not put comments or docstrings at the top of a file.
 - Run `uvx ruff format` and `uvx ruff check`, and the unit tests in `tests/`.
 

@@ -2,12 +2,13 @@
   "doctype": "DocType",
   "name": "VPN Network",
   "module": "Internal VPN",
-  "autoname": "prompt",
+  "issingle": 1,
   "engine": "InnoDB",
   "field_order": [
     "subnet",
-    "revision",
     "hub",
+    "hub_endpoint",
+    "revision",
     "hub_digest",
     "hub_alert"
   ],
@@ -16,19 +17,26 @@
       "fieldname": "subnet",
       "label": "Subnet",
       "fieldtype": "Data",
-      "read_only": 1
-    },
-    {
-      "fieldname": "revision",
-      "label": "Revision",
-      "fieldtype": "Int",
-      "read_only": 1
+      "description": "Inside 100.64.0.0/10. Fixed once set."
     },
     {
       "fieldname": "hub",
       "label": "Hub",
       "fieldtype": "Link",
-      "options": "VPN Peer",
+      "options": "VPN Server",
+      "description": "Fixed once set."
+    },
+    {
+      "fieldname": "hub_endpoint",
+      "label": "Hub Endpoint",
+      "fieldtype": "Data",
+      "description": "Public UDP endpoint, such as 203.0.113.10:51820 or [2001:db8::10]:51820.",
+      "mandatory_depends_on": "eval:doc.hub"
+    },
+    {
+      "fieldname": "revision",
+      "label": "Revision",
+      "fieldtype": "Int",
       "read_only": 1
     },
     {
@@ -49,11 +57,8 @@
   "permissions": [
     {
       "role": "VPN Manager",
-      "read": 1
-    },
-    {
-      "role": "VPN Engineer",
-      "read": 1
+      "read": 1,
+      "write": 1
     }
   ],
   "track_changes": 1
