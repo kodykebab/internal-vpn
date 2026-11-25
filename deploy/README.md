@@ -44,6 +44,8 @@ Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 | `hub_public_key` | Hub key, spokes only |
 | `url`, `token`, `ca_file` | App URL, the host user's `api_key:api_secret`, optional CA file |
 
+Give each host user only the VPN Host role, which has no Desk access. Optionally set **Restrict IP** on it to the host's address.
+
 Run the same `host.py` version as the app on every host. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
 
 Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn`, mode `0440`, with the bench user. Check it with `visudo -cf`. It lets Frappe start the updater right after a change; otherwise the timer catches up. Grant nothing else, and keep the agent files root-owned.
@@ -85,7 +87,7 @@ The firewall loads before `ivpn0` and the agent. It blocks hub services from mem
 
 | Task | Steps |
 | --- | --- |
-| Add an engineer | Manager: **Add Engineer** on VPN Network, then hand over the initial password. Engineer: log in, create a VPN Device, import the configuration it shows. |
+| Add an engineer | Manager: **Invite Engineer** on VPN Network. Engineer: accept the email, create a VPN Device, import the configuration it shows. Later sign-ins use the email link on the login page. |
 | Disable a member | Clear **Enabled**. Status shows the hub Current once applied. |
 | Revoke a user | Disable the user or remove their VPN role. |
 | Free an address | Delete a disabled member after the hub has applied the change. |
@@ -100,7 +102,6 @@ All are off by default.
 
 | Setting | Turn on |
 | --- | --- |
-| Email invites | `bench --site <site> set-config internal_vpn_invite_email 1`, plus outgoing email |
 | Two-factor login | System Settings > Enable Two Factor Auth |
 | Backups | Schedule site backups. Keep each host's `/var/lib/internal-vpn` |
 | Hub alerts | `bench --site <site> set-config internal_vpn_hub_alert_minutes 10`, scheduler on. Managers get one notification per outage and one on recovery |
@@ -114,6 +115,7 @@ All are off by default.
 
     ```python
     from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
+
     network = VPNNetwork.load_locked()
     network.revision = max(network.revision, highest_observed_revision)
     network.advance_revision()

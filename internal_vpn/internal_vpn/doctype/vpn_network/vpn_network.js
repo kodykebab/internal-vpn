@@ -17,47 +17,41 @@ class VPNNetworkForm {
 		if (frm.doc.hub_alert) frm.set_intro(__(frm.doc.hub_alert), "red");
 		frm.set_query("hub", () => ({ filters: { enabled: 1 } }));
 
-		frm.add_custom_button(__("Add Engineer"), () => this.add_engineer());
+		frm.add_custom_button(__("Invite Engineer"), () => this.invite_engineer());
 		frm.add_custom_button(__("Status"), () =>
 			frm.call({ method: "get_status", doc: frm.doc, type: "GET", callback: (r) => this.show_status(r.message) })
 		);
 	}
 
-	add_engineer() {
+	invite_engineer() {
 		frappe.prompt(
-			[
-				{ fieldname: "email", label: __("Email"), fieldtype: "Data", options: "Email", reqd: 1 },
-				{ fieldname: "first_name", label: __("First Name"), fieldtype: "Data" },
-			],
-			(values) => this.frm.call("add_engineer", values, (r) => this.show_credentials(r.message)),
-			__("Add Engineer")
+			{ fieldname: "emails", label: __("Emails"), fieldtype: "Small Text", reqd: 1 },
+			({ emails }) =>
+				frappe.call({
+					method: "frappe.core.api.user_invitation.invite_by_email",
+					args: {
+						emails,
+						roles: ["VPN Engineer"],
+						redirect_to_path: "/desk/vpn-device",
+						app_name: "internal_vpn",
+					},
+					freeze: true,
+					callback: ({ message }) =>
+						frappe.msgprint(
+							[
+								[__("Invited"), message.invited_emails],
+								[__("Already invited"), message.pending_invite_emails],
+								[__("Already accepted"), message.accepted_invite_emails],
+								[__("Disabled users"), message.disabled_user_emails],
+							]
+								.filter(([, emails]) => emails.length)
+								.map(([label, emails]) => `${label}: ${frappe.utils.escape_html(emails.join(", "))}`)
+								.join("<br>"),
+							__("Invite Engineer")
+						),
+				}),
+			__("Invite Engineer")
 		);
-	}
-
-	show_credentials({ user, password }) {
-		if (!password) {
-			frappe.show_alert({ message: __("{0} can now register devices", [user]), indicator: "green" });
-			return;
-		}
-		const text = `${user}\n${password}`;
-		const dialog = new frappe.ui.Dialog({
-			title: __("Initial Password"),
-			fields: [
-				{ fieldname: "credentials", fieldtype: "Code", read_only: 1, default: text },
-				{
-					fieldtype: "HTML",
-					options: `<p class="text-muted small">${__(
-						"Shown once. Hand it to the engineer privately; they can change it under My Settings."
-					)}</p>`,
-				},
-			],
-			primary_action_label: __("Copy"),
-			primary_action() {
-				frappe.utils.copy_to_clipboard(text);
-				dialog.hide();
-			},
-		});
-		dialog.show();
 	}
 
 	show_status(status) {

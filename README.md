@@ -21,7 +21,6 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 | `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports |
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
-| `internal_vpn/auth.py` | Blocks guests except login and password pages |
 | `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |
 
 ## Roles
@@ -30,7 +29,7 @@ In Desk, **Internal VPN** opens the device list. Servers and devices use the sta
 
 | Role | Can |
 | --- | --- |
-| VPN Manager | Edit the network settings, add engineers, view status. Create, edit and delete servers. Edit and delete any device |
+| VPN Manager | Edit the network settings, invite engineers, view status. Create, edit and delete servers. Edit and delete any device |
 | VPN Engineer | Create, edit and delete their own devices |
 | VPN Host | Fetch its server's configuration and report back, through the `agent` right on its shared VPN Server. One user per server |
 
@@ -41,9 +40,11 @@ The hub enforces who reaches whom: servers reach each other, members reach serve
 ## Install
 
 1. Create a dedicated site with this app, using Pilot or bench and Python 3.14+.
-2. Finish the setup wizard as Administrator. Until then, Frappe sends other users to it.
-3. Give operators `VPN Manager` and turn off signup in Website Settings.
-4. Set up the hosts with the [host guide](deploy/README.md).
+2. Set up an outgoing Email Account. Installing the app turns on email link sign-in and turns off password sign-in for every user, Administrator included.
+3. Open Desk as Administrator with `bench --site <site> browse --user Administrator` and finish the setup wizard. Until then, Frappe sends other users to it.
+4. Create operator users with `VPN Manager`. Keep signup off in Website Settings.
+5. Managers invite engineers with **Invite Engineer** on VPN Network. Frappe emails the invitation; accepting it adds `VPN Engineer`.
+6. Set up the hosts with the [host guide](deploy/README.md).
 
 ## Tests
 

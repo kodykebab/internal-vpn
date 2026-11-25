@@ -2,3 +2,4 @@
 
 [post_model_sync]
 internal_vpn.patches.split_vpn_peer
+internal_vpn.patches.email_link_login

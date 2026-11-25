@@ -16,7 +16,8 @@ add_to_apps_screen = [
 ]
 
 fixtures = [{"dt": "Role", "filters": [["name", "in", ["VPN Manager", "VPN Engineer", "VPN Host"]]]}]
-auth_hooks = ["internal_vpn.auth.require_login"]
+after_install = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.after_install"
+user_invitation = {"allowed_roles": {"VPN Manager": ["VPN Engineer"]}}
 doc_events = {
     "User": {
         "on_update": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.on_user_change",

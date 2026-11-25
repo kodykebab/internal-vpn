@@ -198,30 +198,6 @@ class VPNNetwork(Document):
             else None,
         }
 
-    @frappe.whitelist(methods=["POST"])
-    def add_engineer(self, email: str, first_name: str | None = None) -> dict:
-        """Give a user the engineer role. A new user gets an initial password for the operator to hand
-        over, or Frappe's email link when `internal_vpn_invite_email` is set."""
-        self.check_permission("write")
-        password = None
-        if frappe.db.exists("User", email):
-            user = frappe.get_doc("User", email)
-        else:
-            by_email = bool(frappe.conf.get("internal_vpn_invite_email"))
-            password = None if by_email else frappe.generate_hash(length=24)
-            user = frappe.get_doc(
-                {
-                    "doctype": "User",
-                    "email": email,
-                    "first_name": first_name or email.split("@")[0],
-                    "send_welcome_email": int(by_email),
-                    "new_password": password,
-                }
-            )
-        user.flags.ignore_permissions = True
-        user.add_roles(MEMBER_ROLES["VPN Device"])
-        return {"user": user.name, "password": password}
-
     @frappe.whitelist(methods=["GET"])
     def get_status(self) -> dict:
         """Last application report per server."""
@@ -378,3 +354,8 @@ def check_hub():
 def on_user_change(user, method=None):
     if frappe.db.table_exists("VPN Server"):
         VPNNetwork.load_locked().on_user_change(user, method)
+
+
+def after_install():
+    """Sign in with an email link only; Administrator gets in with `bench browse`."""
+    frappe.db.set_single_value("System Settings", {"login_with_email_link": 1, "disable_user_pass_login": 1})

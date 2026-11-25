@@ -6,13 +6,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
 
 import frappe
 import frappe.app
+from frappe.core.api.user_invitation import invite_by_email
 from frappe.handler import run_doc_method
 from frappe.utils import add_to_date, now_datetime
-from frappe.utils.password import check_password
 from test_host import key
 from werkzeug.test import Client
 from werkzeug.wrappers import Request, Response
@@ -224,21 +223,36 @@ class MembershipTests(unittest.TestCase):
         self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(5))
         self.assertEqual(frappe.db.get_value("VPN Device", device.name, "public_key"), key(5))
 
-    def test_managers_add_engineers(self):
-        email = f"vpn-added-{frappe.generate_hash(length=8)}@example.test"
+    def test_managers_invite_engineers(self):
+        email = f"vpn-invited-{frappe.generate_hash(length=8)}@example.test"
+
+        def invite(actor, roles=("VPN Engineer",)):
+            return self.act(
+                actor, lambda: invite_by_email(email, list(roles), "/desk/vpn-device", "internal_vpn")
+            )
+
         with self.assertRaises(frappe.PermissionError):
-            self.call(ENGINEER, "VPN Network", "VPN Network", "add_engineer", email=email, first_name="Added")
-        added = self.call(
-            MANAGER, "VPN Network", "VPN Network", "add_engineer", email=email, first_name="Added"
-        )
-        self.assertEqual(check_password(email, added["password"]), email)
+            invite(ENGINEER)
+        with self.assertRaises(frappe.ValidationError):
+            invite(MANAGER, ["VPN Manager"])
+        with patch(
+            "frappe.core.doctype.user_invitation.user_invitation.UserInvitation.send_invitation_mail"
+        ) as mail:
+            self.assertEqual(invite(MANAGER)["invited_emails"], [email])
+        mail.assert_called_once()
+        invitation = frappe.get_doc("User Invitation", {"email": email})
+        self.act("Guest", lambda: invitation.accept(ignore_permissions=True))
         self.assertIn("VPN Engineer", frappe.get_roles(email))
-        self.assertEqual(frappe.db.get_value("User", email, "user_type"), "System User")
         self.assertTrue(self.device(key(4), actor=email).name)
-        self.assertIsNone(
-            self.call(MANAGER, "VPN Network", "VPN Network", "add_engineer", email=HUB)["password"]
-        )
-        self.assertTrue({"VPN Host", "VPN Engineer"} <= set(frappe.get_roles(HUB)))
+
+    def test_sign_in_is_email_link_only(self):
+        settings = frappe.get_single("System Settings")
+        self.assertTrue(settings.login_with_email_link and settings.disable_user_pass_login)
+        with self.http(use_cookies=False) as client:
+            with client.post("/api/method/login", json={"usr": "Administrator", "pwd": "admin"}) as response:
+                self.assertEqual(response.status_code, 401)
+            with client.get("/api/resource/VPN Device") as response:
+                self.assertEqual(response.status_code, 403)
 
     def test_hub_wakeup_waits_for_commit_and_is_discarded_on_rollback(self):
         for commit in (False, True):
@@ -458,7 +472,7 @@ class MembershipTests(unittest.TestCase):
         payload = {"dt": "VPN Server", "dn": self.hub.name, "method": "get_configuration", "args": {}}
         with self.http() as client:
             with client.post(path, json=payload) as response:
-                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.status_code, 403)
             with client.get(path, query_string={**payload, "args": "{}"}, headers=headers) as response:
                 self.assertEqual(response.status_code, 403)
             with client.post(path, json=payload, headers=headers) as response:
@@ -487,54 +501,6 @@ class MembershipTests(unittest.TestCase):
                 self.assertEqual("internal_vpn" in apps, allowed)
                 if allowed:
                     self.assertEqual(apps["internal_vpn"]["route"], "/desk/vpn-device")
-
-    def test_guest_page_assets_do_not_allow_other_commands(self):
-        with self.http(use_cookies=False) as client:
-            paths = (
-                "/website_script.js",
-                "/api/method/frappe.translate.get_boot_translations",
-            )
-            for path in paths:
-                with self.subTest(path=path), client.get(path) as response:
-                    self.assertEqual(response.status_code, 200)
-                with client.get(path, query_string={"cmd": "frappe.client.get_list"}) as response:
-                    self.assertEqual(response.status_code, 401)
-            with client.get("/api/resource/VPN Device") as response:
-                self.assertEqual(response.status_code, 401)
-            with client.post("/website_script.js") as response:
-                self.assertEqual(response.status_code, 401)
-
-    def test_invitation_password_setup_uses_frappes_token_validation(self):
-        frappe.set_user("Administrator")
-        link = frappe.get_doc("User", ENGINEER)._reset_password(send_email=False)
-        token = parse_qs(urlsplit(link).query)["key"][0]
-        frappe.db.commit()
-        with self.http(use_cookies=False) as client:
-            path = "/api/method/frappe.core.doctype.user.user.update_password"
-            password = "Unique-Test-Password-" + frappe.generate_hash(length=20)
-            with client.get("/update-password", query_string={"key": token}) as response:
-                self.assertEqual(response.status_code, 200)
-            with client.post(
-                "/",
-                headers={"Accept": "application/json"},
-                data={
-                    "cmd": "frappe.core.doctype.user.user.test_password_strength",
-                    "new_password": password,
-                },
-            ) as response:
-                self.assertEqual(response.status_code, 200)
-            with client.post(path, json={"key": "invalid", "new_password": password}) as response:
-                self.assertEqual(response.status_code, 410)
-            with client.post(path, json={"key": token, "new_password": password}) as response:
-                self.assertEqual(response.status_code, 200)
-            with client.post(path, json={"key": token, "new_password": password + "-again"}) as response:
-                self.assertEqual(response.status_code, 410)
-            with client.post(
-                "/",
-                headers={"Accept": "application/json"},
-                data={"cmd": "frappe.client.get_list", "doctype": "User"},
-            ) as response:
-                self.assertEqual(response.status_code, 401)
 
     def test_owner_eligibility_changes_membership_and_revision(self):
         device = self.device()
