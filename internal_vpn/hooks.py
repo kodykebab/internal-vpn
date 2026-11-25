@@ -4,6 +4,7 @@ app_publisher = "Frappe"
 app_description = "Internal VPN control plane"
 app_email = "developers@frappe.io"
 app_license = "mit"
+export_python_type_annotations = True
 
 add_to_apps_screen = [
     {

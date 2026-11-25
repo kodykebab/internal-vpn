@@ -16,6 +16,22 @@ SYSTEM_FIELDS = ("revision", "hub_digest")
 class VPNNetwork(Document):
     """Network settings. The row lock serializes allocation and revisions."""
 
+    # begin: auto-generated types
+    # This code is auto-generated. Do not modify anything in this block.
+
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from frappe.types import DF
+
+        hub: DF.Link | None
+        hub_digest: DF.Data | None
+        hub_endpoint: DF.Data | None
+        revision: DF.Int
+        stale_minutes: DF.Int
+        subnet: DF.Data | None
+    # end: auto-generated types
+
     @staticmethod
     def load_locked() -> "VPNNetwork":
         return frappe.get_doc("VPN Network", "VPN Network", for_update=True)

@@ -10,6 +10,26 @@ from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNMember,
 class VPNServer(VPNMember):
     """A hub or service host. Its host user acts for it through the `agent` permission."""
 
+    # begin: auto-generated types
+    # This code is auto-generated. Do not modify anything in this block.
+
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from frappe.types import DF
+
+        address: DF.Data | None
+        apply_success: DF.Check
+        enabled: DF.Check
+        label: DF.Data
+        public_key: DF.Data
+        reported_at: DF.Datetime | None
+        reported_digest: DF.Data | None
+        reported_revision: DF.Int
+        status: DF.Literal["Pending", "Current", "Failed", "Stale"]
+        user: DF.Link
+    # end: auto-generated types
+
     system_fields = (
         "address",
         "status",
