@@ -1,4 +1,3 @@
-import subprocess
 import unittest
 from copy import deepcopy
 from unittest.mock import patch
@@ -12,37 +11,17 @@ from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
 SUBNET = "100.100.64.0/24"
 
 
-class HubUpdateTests(unittest.TestCase):
-    def test_only_the_fixed_service_can_be_started(self):
-        with patch("subprocess.run") as run:
-            VPNNetwork.request_hub_update()
-        run.assert_called_once_with(
-            [
-                "/usr/bin/sudo",
-                "-n",
-                "/usr/bin/systemctl",
-                "start",
-                "--no-block",
-                "internal-vpn-update.service",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=5,
-        )
-
-    def test_start_failure_is_logged_without_failing_a_committed_change(self):
-        for error in (
-            OSError(),
-            subprocess.CalledProcessError(1, "sudo"),
-            subprocess.TimeoutExpired("sudo", 5),
-        ):
+class HubApplyTests(unittest.TestCase):
+    def test_only_the_hub_site_enqueues_the_apply_job(self):
+        for conf, enqueued in (({}, False), ({"internal_vpn_interface": "ivpn0"}, True)):
             with (
-                self.subTest(error=type(error)),
-                patch("subprocess.run", side_effect=error),
-                patch("frappe.logger") as log,
+                self.subTest(conf=conf),
+                patch("frappe.conf", _dict(conf)),
+                patch("frappe.enqueue") as enqueue,
             ):
-                VPNNetwork.request_hub_update()
-                log.return_value.error.assert_called_once()
+                VPNNetwork.enqueue_hub_apply()
+                self.assertEqual(enqueue.called, enqueued)
+        self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
 
 
 class TopologyTests(unittest.TestCase):

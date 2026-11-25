@@ -10,10 +10,10 @@ Host provisioning owns `ivpn0`, its private key, address and firewall. This guid
 
 ## Prerequisites
 
-- Root, Python 3.10+, `wg`, and `nft` on the hub. Run the agent in the host's own network namespace.
+- Root, Python 3.10+ and `wg` on spokes; `wg`, `nft` and the bench on the hub. Run everything in the host's own network namespace.
 - `ivpn0` with a key generated on the host and the address from registration.
 - Hub only: no NAT. [Start at boot](#start-at-boot) sets forwarding, redirects and the firewall.
-- HTTPS to the VPN app that does not go through the tunnel.
+- Spokes: HTTPS to the VPN app that does not go through the tunnel.
 
 ## Frappe Cloud
 
@@ -23,7 +23,20 @@ Host provisioning owns `ivpn0`, its private key, address and firewall. This guid
 - Install the app with Pilot: **Import app** from the repository, then **New site** with Internal VPN.
 - Run host steps as root in the server's **Web console**. Install `wireguard-tools`, and `nftables` on the hub.
 
-## Install
+## Install on the hub
+
+The app applies membership to the hub itself. A job runs right after each change and once a minute.
+
+```sh
+sudo install -d -m 0700 -o frappe -g frappe /var/lib/internal-vpn
+sudo install -m 0440 deploy/internal-vpn.sudoers /etc/sudoers.d/internal-vpn
+sudo visudo -cf /etc/sudoers.d/internal-vpn
+bench --site <site> set-config internal_vpn_interface ivpn0
+```
+
+Replace `frappe` with the bench user, in both places. The sudoers rule lets that user read and set `ivpn0` peers and replace nftables rules, and nothing else. Keep the bench's scheduler and a worker for the `short` queue running. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data. Set `internal_vpn_state_dir` to use another folder.
+
+## Install on spokes
 
 ```sh
 sudo install -d -m 0755 /opt/internal-vpn
@@ -38,17 +51,15 @@ Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
 | Field | Value |
 | --- | --- |
 | `name` | VPN Server name |
-| `address`, `subnet`, `public_key` | From registration |
+| `address`, `subnet`, `public_key` | From the VPN Server |
 | `interface` | `ivpn0` |
-| `topology` | `hub` or `spoke` |
-| `hub_public_key` | Hub key, spokes only |
+| `topology` | `spoke` |
+| `hub_public_key` | The hub's key |
 | `url`, `token`, `ca_file` | App URL, the host user's `api_key:api_secret`, optional CA file |
 
 Give each host user only the VPN Host role, which has no Desk access. Optionally set **Restrict IP** on it to the host's address.
 
-Run the same `host.py` version as the app on every host. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`: its revision watermark rejects stale data.
-
-Hub only: install [internal-vpn.sudoers](internal-vpn.sudoers) as `/etc/sudoers.d/internal-vpn`, mode `0440`, with the bench user. Check it with `visudo -cf`. It lets Frappe start the updater right after a change; otherwise the timer catches up. Grant nothing else, and keep the agent files root-owned.
+Run the same `host.py` version as the app on every spoke. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`, as on the hub.
 
 ## Start at boot
 
@@ -61,7 +72,7 @@ Address = <address from registration>/<subnet prefix>
 ListenPort = 51820
 ```
 
-Keep `ListenPort` on the hub only. Leave out `[Peer]` sections: the agent manages peers. Enable it with `sudo systemctl enable --now wg-quick@ivpn0`.
+Keep `ListenPort` on the hub only. Leave out `[Peer]` sections: the app and the agent manage peers. Enable it with `sudo systemctl enable --now wg-quick@ivpn0`.
 
 On the hub, set the interface and subnet in [hub.nft](hub.nft), then:
 
@@ -75,7 +86,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now internal-vpn-firewall.service
 ```
 
-The firewall loads before `ivpn0` and the agent. It blocks hub services from members and starts closed: members reach nothing new until the agent's first run sets current rules. Loading it again resets it.
+The firewall loads before `ivpn0`. It blocks hub services from members and starts closed: members reach nothing new until the hub job's first run sets current rules. Loading it again resets it.
 
 ## Bring up
 
@@ -108,7 +119,7 @@ All are off by default.
 
 ## Database recovery
 
-1. Stop the updater on every host and pause changes. Keep VPN traffic isolated: the backup may miss revocations.
+1. Stop the updater timer on every spoke. On the hub, run `bench --site <site> set-config internal_vpn_interface ""`. Pause changes. Keep VPN traffic isolated: the backup may miss revocations.
 2. Note the highest revision in any host's `/var/lib/internal-vpn/revision.json`. Keep hosts without one isolated until reprovisioned.
 3. Fix owners, keys and enablement in the VPN forms. Reapply missing revocations.
 4. Raise the revision above that maximum in `bench --site <site> console`:
@@ -122,7 +133,7 @@ All are off by default.
     frappe.db.commit()
     ```
 
-5. Start the updaters, confirm fresh reports and reachability, then restore traffic. Never delete watermarks or lower revisions.
+5. Set `internal_vpn_interface` back on the hub and start the spoke timers. Confirm every server is Current and reachable, then restore traffic. Never delete watermarks or lower revisions.
 
 ## Measure
 
@@ -130,4 +141,4 @@ All are off by default.
 sudo python3 /opt/internal-vpn/host.py measure --config /etc/internal-vpn/host.json --probe 100.100.64.1 --unit internal-vpn-update.service
 ```
 
-Prints handshake age, byte counters, ping results and the updater's last result. It reads no private keys.
+Run it on a spoke. It prints handshake age, byte counters, ping results and the updater's last result, and reads no private keys.

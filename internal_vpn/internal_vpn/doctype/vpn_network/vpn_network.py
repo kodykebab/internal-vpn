@@ -1,4 +1,4 @@
-import subprocess
+from pathlib import Path
 
 import frappe
 from frappe import _
@@ -6,7 +6,7 @@ from frappe.model.document import Document
 from frappe.query_builder import DocType
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
-from internal_vpn.host import MAX_PEERS, WireGuard
+from internal_vpn.host import MAX_PEERS, Host, WireGuard
 
 MEMBER_ROLES = {"VPN Server": "VPN Host", "VPN Device": "VPN Engineer"}
 MEMBER_OWNERS = {"VPN Server": "user", "VPN Device": "owner"}
@@ -35,7 +35,7 @@ class VPNNetwork(Document):
         if any(self.get(field) != before.get(field) for field in ("subnet", "hub", "hub_endpoint")):
             self.revision = cint(self.revision) + 1
             self.hub_digest = None
-            frappe.db.after_commit.add(self.request_hub_update)
+            self.enqueue_hub_apply()
 
     def on_update(self):
         if self.has_value_changed("revision") or self.has_value_changed("stale_minutes"):
@@ -55,7 +55,7 @@ class VPNNetwork(Document):
     def advance_revision(self) -> int:
         self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None})
         if self.hub:
-            frappe.db.after_commit.add(self.request_hub_update)
+            self.enqueue_hub_apply()
         self.refresh_statuses()
         return self.revision
 
@@ -81,26 +81,10 @@ class VPNNetwork(Document):
         return "Pending"
 
     @staticmethod
-    def request_hub_update():
-        """Wake the local updater after commit; the timer handles missed wakeups."""
-        try:
-            subprocess.run(
-                [
-                    "/usr/bin/sudo",
-                    "-n",
-                    "/usr/bin/systemctl",
-                    "start",
-                    "--no-block",
-                    "internal-vpn-update.service",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            frappe.logger("internal_vpn", allow_site=True).error(
-                "Could not start the hub updater. Check sudoers and the update timer."
-            )
+    def enqueue_hub_apply():
+        """Apply on the hub after commit. The scheduled run catches anything missed."""
+        if frappe.conf.get("internal_vpn_interface"):
+            frappe.enqueue(apply_hub, queue="short", enqueue_after_commit=True)
 
     @staticmethod
     def is_eligible(user: str, doctype: str) -> bool:
@@ -302,6 +286,27 @@ def parse(parser, value):
 
 def has_desk_access() -> bool:
     return bool(frappe.has_permission("VPN Device", "read") or frappe.has_permission("VPN Network", "read"))
+
+
+def apply_hub():
+    """Apply current membership to the hub's own interface. Runs as a job on the hub's site,
+    which `internal_vpn_interface` marks."""
+    interface = frappe.conf.get("internal_vpn_interface")
+    network = VPNNetwork.load_locked()
+    if not interface or not network.hub:
+        return
+    hub = frappe.get_doc("VPN Server", network.hub, for_update=True)
+    config = {"name": hub.name, "address": hub.address, "public_key": hub.public_key}
+    host = Host({**config, "interface": interface, "subnet": network.subnet, "topology": "hub"}, sudo=True)
+    state = Path(frappe.conf.get("internal_vpn_state_dir") or "/var/lib/internal-vpn")
+    try:
+        host.converge(
+            state,
+            lambda: network.get_configuration(hub),
+            lambda revision, digest: hub.record_report(network, revision, digest),
+        )
+    except Exception:  # noqa: BLE001 - keep the recorded failure report instead of rolling it back
+        frappe.log_error(title=f"Internal VPN hub apply failed at {host.stage}")
 
 
 def refresh_statuses():

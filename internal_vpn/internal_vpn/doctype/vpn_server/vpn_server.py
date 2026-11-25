@@ -46,17 +46,20 @@ class VPNServer(VPNMember):
             frappe.throw(_("Expected a positive integer revision"))
         if success and not re.fullmatch(r"[0-9a-f]{64}", digest or ""):
             frappe.throw(_("Expected the applied configuration digest"))
-        network = self.load_locked()
+        self.record_report(self.load_locked(), revision, digest if success else None)
+        return {"accepted": True}
+
+    def record_report(self, network, revision: int, digest: str | None):
+        """Record what the host applied; None means applying failed."""
         if not (self.reported_revision or 0) <= revision <= network.revision:
             frappe.throw(_("Report revision is out of order"))
         self.db_set(
             {
                 "reported_revision": revision,
-                "apply_success": success,
-                "reported_digest": digest if success else None,
+                "apply_success": digest is not None,
+                "reported_digest": digest,
                 "reported_at": frappe.utils.now_datetime(),
             },
             update_modified=False,
         )
         network.refresh_statuses()
-        return {"accepted": True}

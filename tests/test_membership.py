@@ -17,7 +17,7 @@ from werkzeug.test import Client
 from werkzeug.wrappers import Request, Response
 
 from internal_vpn.host import Host, WireGuard
-from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork
+from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork, apply_hub
 
 SITES = os.environ.get("VPN_TEST_SITES_PATH")
 SITE = os.environ.get("VPN_TEST_SITE")
@@ -40,7 +40,7 @@ ROLES = {
 class MembershipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        wakeup = patch.object(VPNNetwork, "request_hub_update")
+        wakeup = patch.object(VPNNetwork, "enqueue_hub_apply")
         cls.wakeup = wakeup.start()
         cls.addClassCleanup(wakeup.stop)
         frappe.init(SITE, sites_path=SITES)
@@ -255,17 +255,26 @@ class MembershipTests(unittest.TestCase):
             with client.get("/api/resource/VPN Device") as response:
                 self.assertEqual(response.status_code, 403)
 
-    def test_hub_wakeup_waits_for_commit_and_is_discarded_on_rollback(self):
-        for commit in (False, True):
-            frappe.set_user(ENGINEER)
-            frappe.get_doc({"doctype": "VPN Device", "label": "laptop", "public_key": key(3)}).insert()
-            self.wakeup.assert_not_called()
-            if commit:
-                frappe.db.commit()
-            else:
-                frappe.db.rollback()
-                self.wakeup.assert_not_called()
-        self.wakeup.assert_called_once_with()
+    def test_hub_job_applies_and_records_reports(self):
+        self.device()
+        self.assertEqual(self.wakeup.call_count, 1)
+        with tempfile.TemporaryDirectory() as state, patch.object(Host, "apply") as apply:
+            self.act("Administrator", apply_hub)
+            apply.assert_not_called()
+            with patch.dict(
+                frappe.conf, {"internal_vpn_interface": "ivpn0", "internal_vpn_state_dir": state}
+            ):
+                self.act("Administrator", apply_hub)
+                self.assertEqual(self.hub_status(), "Current")
+                self.assertEqual(len(apply.call_args.args[0]["peers"]), 1)
+                self.assertTrue((Path(state) / "revision.json").exists())
+
+                apply.side_effect = OSError("wg failed")
+                self.device(key(4))
+                self.act("Administrator", apply_hub)
+                self.assertEqual(self.hub_status(), "Failed")
+                failures = frappe.get_all("Error Log", {"method": "Internal VPN hub apply failed at apply"})
+                self.assertTrue(failures)
 
     def test_capacity_reserves_disabled_members_and_delete_frees_it(self):
         with patch(f"{MODULE}.MAX_PEERS", 1):

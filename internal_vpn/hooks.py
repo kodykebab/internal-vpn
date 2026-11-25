@@ -25,5 +25,10 @@ doc_events = {
     }
 }
 scheduler_events = {
-    "cron": {"* * * * *": ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.refresh_statuses"]}
+    "cron": {
+        "* * * * *": [
+            "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.apply_hub",
+            "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.refresh_statuses",
+        ]
+    }
 }

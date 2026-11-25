@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from internal_vpn.host import ControlPlane, Host, NoRedirect, WireGuard, main
+from internal_vpn.host import NFT, ControlPlane, Host, NoRedirect, WireGuard, main
 
 
 def key(byte):
@@ -112,7 +112,7 @@ class UpdateTests(unittest.TestCase):
             patch.object(WireGuard, "execute") as execute,
         ):
             (host or self.host).apply(snapshot)
-        self.nft = [call.kwargs["input"] for call in execute.call_args_list if call.args[0] == "nft"]
+        self.nft = [call.kwargs["input"] for call in execute.call_args_list if call.args[0] == NFT]
         return [call.args for call in set_peer.call_args_list]
 
     def test_hub_rules_let_members_reach_servers_but_never_open_devices(self):
@@ -136,6 +136,16 @@ class UpdateTests(unittest.TestCase):
         )
         self.apply(host=spoke, snapshot=spoke_snapshot)
         self.assertEqual(self.nft, [])
+
+    def test_hub_job_runs_only_whitelisted_absolute_commands_through_sudo(self):
+        with patch("subprocess.run", return_value=SimpleNamespace(stdout="")) as run:
+            Host(CONFIG, sudo=True).wireguard.show("public-key")
+            Host(CONFIG).wireguard.show("public-key")
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            ["/usr/bin/sudo", "-n", "/usr/bin/wg", "show", "ivpn0", "public-key"],
+        )
+        self.assertEqual(run.call_args_list[1].args[0], ["/usr/bin/wg", "show", "ivpn0", "public-key"])
 
     def test_removal_precedes_updates_and_private_key_is_untouched(self):
         calls = self.apply((key(3), "100.100.64.3/32", "(none)", "off"))

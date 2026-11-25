@@ -28,6 +28,8 @@ SNAPSHOT_FIELDS = {
 }
 PEER_FIELDS = {"public_key", "address", "endpoint", "allowed_ips"}
 ACCESS_TABLE = "inet internal_vpn_access"
+# Absolute paths, so a hub sudoers rule can name the exact commands.
+WG, NFT, SUDO = "/usr/bin/wg", "/usr/sbin/nft", "/usr/bin/sudo"
 UNIT_FIELDS = ("LoadState", "ActiveState", "Result", "ExecMainStatus", "ExecMainExitTimestampMonotonic")
 MAX_PEERS = 10000
 MAX_PROBES = 8
@@ -38,16 +40,17 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 class WireGuard:
     """A local WireGuard interface. The static parsers are shared with the VPN DocTypes."""
 
-    def __init__(self, interface: str):
+    def __init__(self, interface: str, sudo: bool = False):
         if not isinstance(interface, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,15}", interface):
             raise ValueError("Invalid local interface")
         self.interface = interface
+        self.prefix = (SUDO, "-n") if sudo else ()
 
     def execute(
         self, *command: str, timeout: int = 15, check: bool = True, input: str | None = None
     ) -> subprocess.CompletedProcess:
         return subprocess.run(
-            command,
+            [*self.prefix, *command],
             input=input,
             check=check,
             text=True,
@@ -58,7 +61,7 @@ class WireGuard:
 
     def show(self, field: str) -> str:
         # Never read dump or showconf: they contain private and preshared keys.
-        return self.execute("wg", "show", self.interface, field).stdout.strip()
+        return self.execute(WG, "show", self.interface, field).stdout.strip()
 
     def peers(self) -> dict[str, tuple[str, str | None, str]]:
         """Live allowed IPs, endpoint and keepalive per peer."""
@@ -72,7 +75,7 @@ class WireGuard:
         }
 
     def set_peer(self, public_key: str, *arguments: str):
-        self.execute("wg", "set", self.interface, "peer", public_key, *arguments)
+        self.execute(WG, "set", self.interface, "peer", public_key, *arguments)
 
     @staticmethod
     def validate_public_key(value) -> str:
@@ -171,25 +174,30 @@ class ControlPlane:
 class Host:
     """Apply public peers; provisioning owns the interface and private key."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, sudo: bool = False):
         self.config = config
         self.stage = "configuration"
         if config.get("namespace"):
             raise ValueError("Run the agent in its host network namespace")
-        self.wireguard = WireGuard(config["interface"])
+        self.wireguard = WireGuard(config["interface"], sudo)
         self.subnet = WireGuard.parse_subnet(config["subnet"])
         self.address = WireGuard.parse_address(config["address"], self.subnet)
         self.public_key = WireGuard.validate_public_key(config["public_key"])
 
     def update(self, state: Path) -> dict:
-        """Fetch, validate, apply and report current membership. Runs are serialized per host."""
+        """Fetch membership from the control plane, then converge."""
+        control_plane = ControlPlane(self.config)
+        return self.converge(state, control_plane.get_configuration, control_plane.report)
+
+    def converge(self, state: Path, fetch, report) -> dict:
+        """Fetch, validate, apply and report current membership. Runs are serialized per host.
+        `report(revision, digest)` gets None as the digest when applying failed."""
         self.stage = "state"
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (state / "lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.stage = "fetch"
-            control_plane = ControlPlane(self.config)
-            snapshot = control_plane.get_configuration()
+            snapshot = fetch()
             self.stage = "validation"
             self.validate(snapshot)
             digest = WireGuard.digest(snapshot)
@@ -199,10 +207,10 @@ class Host:
             try:
                 self.apply(snapshot)
             except Exception:
-                control_plane.report(snapshot["revision"], None)
+                report(snapshot["revision"], None)
                 raise
             self.stage = "report"
-            control_plane.report(snapshot["revision"], digest)
+            report(snapshot["revision"], digest)
             return {"revision": snapshot["revision"], "applied": True}
 
     def validate(self, snapshot: dict):
@@ -330,7 +338,7 @@ class Host:
         rules.append(f"{link} counter drop")
         body = "".join(f"\t\t{rule}\n" for rule in rules)
         self.wireguard.execute(
-            "nft",
+            NFT,
             "-f",
             "-",
             input=f"table {ACCESS_TABLE}\ndelete table {ACCESS_TABLE}\n"

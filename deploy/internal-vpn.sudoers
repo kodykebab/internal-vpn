@@ -1,2 +1,7 @@
 # Replace frappe with the hub's bench OS user. Install with visudo.
-frappe ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block internal-vpn-update.service
+# The hub job reads peers, sets peers and replaces the nftables rules. Nothing else.
+Cmnd_Alias IVPN_SHOW = /usr/bin/wg show ivpn0 public-key, /usr/bin/wg show ivpn0 allowed-ips, \
+    /usr/bin/wg show ivpn0 endpoints, /usr/bin/wg show ivpn0 persistent-keepalive
+Cmnd_Alias IVPN_SET = /usr/bin/wg set ivpn0 peer *
+Cmnd_Alias IVPN_NFT = /usr/sbin/nft -f -
+frappe ALL=(root) NOPASSWD: IVPN_SHOW, IVPN_SET, IVPN_NFT

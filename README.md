@@ -5,11 +5,12 @@ A Frappe app that runs a hub-and-spoke WireGuard network for internal servers an
 ```text
 Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Cargo, ...)
                                  |
-                       VPN app + local updater
+                    VPN app applies hub peers
 ```
 
 - The app runs on the hub and owns membership. It never sees a private key.
-- Every host runs `host.py` as root. It fetches its peer list, applies it to `ivpn0` and reports back.
+- The app applies the hub's peers itself, in a job after each change and once a minute, through a narrow sudoers rule.
+- Every spoke runs `host.py` as root. It fetches its peer list, applies it to `ivpn0` and reports back.
 - Revocation takes effect when the hub applies it. Spokes need no refresh.
 - The VPN adds reachability only. Services keep their own login.
 
