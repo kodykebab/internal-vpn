@@ -20,7 +20,7 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 | --- | --- |
 | `internal_vpn/internal_vpn/doctype/vpn_network` | The network settings (Single): subnet, hub, revisions, server status, user hooks. Shared member rules |
 | `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports, status |
-| `internal_vpn/internal_vpn/notification` | **VPN Server Health**: notifies managers when a server turns Failed or Stale, and when it recovers |
+| `internal_vpn/internal_vpn/notification` | **VPN Server Health** tells managers when a server turns Failed or Stale and when it recovers. **VPN Device Registered** tells them about every new device |
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
 | `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |

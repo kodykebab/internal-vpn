@@ -216,13 +216,20 @@ class MembershipTests(unittest.TestCase):
         for action in (
             lambda: self.update("VPN Device", device.name, actor=OTHER, enabled=0),
             lambda: self.delete("VPN Device", device.name, actor=OTHER),
-            lambda: self.call(OTHER, "VPN Device", device.name, "get_configuration", http_method="GET"),
+            lambda: self.act(OTHER, lambda: frappe.get_doc("VPN Device", device.name, check_permission=True)),
             lambda: self.act(ENGINEER, lambda: frappe.get_doc("VPN Network").check_permission("read")),
         ):
             with self.assertRaises(frappe.PermissionError):
                 action()
         self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(5))
         self.assertEqual(frappe.db.get_value("VPN Device", device.name, "public_key"), key(5))
+
+    def test_managers_are_told_about_new_devices(self):
+        with patch("frappe.email.doctype.notification.notification.enqueue_create_notification") as alerts:
+            device = self.device()
+        self.assertEqual(alerts.call_args.args[1]["subject"], f"{ENGINEER} registered VPN device laptop")
+        self.assertIn(MANAGER, alerts.call_args.args[0])
+        self.assertEqual(alerts.call_args.args[1]["document_name"], device.name)
 
     def test_managers_invite_engineers(self):
         email = f"vpn-invited-{frappe.generate_hash(length=8)}@example.test"
@@ -557,7 +564,11 @@ class MembershipTests(unittest.TestCase):
             self.assertEqual(statuses()[self.hub.name], "Pending")
             self.report_hub()
             self.assertEqual(statuses()[self.hub.name], "Current")
-            alerts.assert_not_called()
+            # Only the new-device notice; no server alert for routine changes.
+            self.assertEqual(
+                [call.args[1]["document_type"] for call in alerts.call_args_list], ["VPN Device"]
+            )
+            alerts.reset_mock()
 
             refresh(minutes=10)
             self.assertEqual(statuses(), {self.hub.name: "Stale", service.name: "Stale"})

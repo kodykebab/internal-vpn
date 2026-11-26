@@ -1,0 +1,20 @@
+{
+ "channel": "System Notification",
+ "condition_type": "Python",
+ "doctype": "Notification",
+ "document_type": "VPN Device",
+ "enabled": 1,
+ "event": "New",
+ "is_standard": 1,
+ "message_type": "Markdown",
+ "modified": "2026-11-26 00:00:00.000000",
+ "module": "Internal VPN",
+ "name": "VPN Device Registered",
+ "notification_type": "Alert",
+ "recipients": [
+  {
+   "receiver_by_role": "VPN Manager"
+  }
+ ],
+ "subject": "{{ doc.owner }} registered VPN device {{ doc.label }}"
+}

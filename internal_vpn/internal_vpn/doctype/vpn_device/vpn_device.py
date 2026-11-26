@@ -20,6 +20,7 @@ class VPNDevice(VPNMember):
         public_key: DF.Data
     # end: auto-generated types
 
-    @frappe.whitelist(methods=["GET"])
-    def get_configuration(self) -> dict:
-        return self.load_locked().get_configuration(self)
+    def onload(self):
+        network = frappe.get_doc("VPN Network")
+        if network.hub:
+            self.set_onload("configuration", network.get_configuration(self))
