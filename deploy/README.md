@@ -109,6 +109,25 @@ The firewall loads before `ivpn0`. It blocks hub services from members and start
 
 Agent errors print a `stage` without details. Read them in the unit journal. A failed apply is retried on the next run. Stopping the timer keeps the current peers.
 
+## VPN-only Desk
+
+Staff then use this site only over the VPN, at `http://<hub VPN address>`. Host users, customers of other sites and an engineer's first device are not affected.
+
+1. Fill in [internal-vpn-desk.conf](internal-vpn-desk.conf) and install it as `/etc/nginx/conf.d/internal-vpn-desk.conf`. Run `sudo nginx -t`, then `sudo systemctl reload nginx`. Pilot leaves this file alone. Because Pilot already listens on port 80 for every address, nginx still starts while `ivpn0` is down.
+2. The hub firewall from [Start at boot](#start-at-boot) lets VPN members reach it on port 80 and nothing else.
+3. Open `http://<hub VPN address>` from a device on the VPN and sign in. Then set **VPN-Only Desk** on VPN Network.
+
+The app decides "over the VPN" from `X-Real-IP`, which only nginx sets: Pilot from the address it verified, and this file from the WireGuard peer. A forged `X-Forwarded-For` does not count. Administrator, managers and other staff are limited at once. An engineer is limited when their first device is older than **Onboarding Window (Minutes)**, so they can copy its configuration from outside the VPN until then. Sign-in links opened outside the VPN send staff to the VPN address before the link is used. Realtime updates do not run over the VPN address.
+
+If the VPN is down, run `ssh -L 8080:<hub VPN address>:80 <hub>` and open `http://localhost:8080`. If `ivpn0` itself is down, clear the switch in `bench --site <site> console` on the hub:
+
+```python
+network = frappe.get_doc("VPN Network")
+network.vpn_only_desk = 0
+network.save()
+frappe.db.commit()
+```
+
 ## Optional settings
 
 All are off by default.

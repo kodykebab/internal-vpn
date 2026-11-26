@@ -2,11 +2,12 @@
 table inet internal_vpn
 delete table inet internal_vpn
 table inet internal_vpn {
-    # The hub only routes. VPN members may ping it but reach no hub service.
+    # The hub routes. VPN members may ping it and reach Desk on port 80, but no other hub service.
     chain input {
         type filter hook input priority 0; policy accept;
         iifname "ivpn0" ct state established,related accept
         iifname "ivpn0" icmp type echo-request accept
+        iifname "ivpn0" tcp dport 80 accept
         iifname "ivpn0" counter drop
     }
 

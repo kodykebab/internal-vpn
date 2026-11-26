@@ -19,6 +19,10 @@ add_to_apps_screen = [
 fixtures = [{"dt": "Role", "filters": [["name", "in", ["VPN Manager", "VPN Engineer", "VPN Host"]]]}]
 after_install = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.after_install"
 user_invitation = {"allowed_roles": {"VPN Manager": ["VPN Engineer"]}}
+auth_hooks = ["internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.require_vpn"]
+override_whitelisted_methods = {
+    "frappe.www.login.login_via_key": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.login_via_key"
+}
 doc_events = {
     "User": {
         "on_update": "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.on_user_change",

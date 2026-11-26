@@ -1,4 +1,6 @@
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlencode
 
 import frappe
 from frappe import _
@@ -28,9 +30,11 @@ class VPNNetwork(Document):
         hub: DF.Link | None
         hub_digest: DF.Data | None
         hub_endpoint: DF.Data | None
+        onboarding_minutes: DF.Int
         revision: DF.Int
         stale_minutes: DF.Int
         subnet: DF.Data | None
+        vpn_only_desk: DF.Check
     # end: auto-generated types
 
     @staticmethod
@@ -110,6 +114,34 @@ class VPNNetwork(Document):
     def is_eligible(user: str, doctype: str) -> bool:
         enabled = frappe.db.get_value("User", user, "enabled")
         return bool(enabled) and MEMBER_ROLES[doctype] in frappe.get_roles(user)
+
+    def needs_vpn(self, user: str) -> bool:
+        """Whether VPN-Only Desk limits this user. Engineers are exempt until their first device is
+        older than the onboarding window."""
+        if not self.vpn_only_desk or frappe.get_cached_value("User", user, "user_type") != "System User":
+            return False
+        roles = frappe.get_roles(user)
+        if user == "Administrator" or "VPN Manager" in roles or "VPN Engineer" not in roles:
+            return True
+        first = frappe.get_all(
+            "VPN Device", {"owner": user}, pluck="creation", order_by="creation asc", limit=1
+        )
+        return bool(first) and get_datetime(first[0]) < add_to_date(
+            now_datetime(), minutes=-cint(self.onboarding_minutes)
+        )
+
+    def request_over_vpn(self) -> bool:
+        """Only nginx sets X-Real-IP: Pilot from the address it verified, the VPN entrance from the
+        WireGuard peer. A missing or foreign address is not the VPN."""
+        address = frappe.get_request_header("X-Real-IP")
+        try:
+            return ipaddress.ip_address(address) in WireGuard.parse_subnet(self.subnet)
+        except (TypeError, ValueError):
+            return False
+
+    def desk_url(self) -> str | None:
+        address = frappe.db.get_value("VPN Server", self.hub, "address") if self.hub else None
+        return f"http://{address}" if address else None
 
     def allocate_address(self) -> str:
         """Reserve capacity for disabled members too, so enabling one cannot overflow the hub."""
@@ -345,6 +377,33 @@ def apply_hub():
         )
     except Exception:  # noqa: BLE001 - keep the recorded failure report instead of rolling it back
         frappe.log_error(title=f"Internal VPN hub apply failed at {host.stage}")
+
+
+def require_vpn():
+    """Auth hook: with VPN-Only Desk on, staff reach this site only over the VPN."""
+    user = frappe.session.user
+    if user in ("", "Guest") or frappe.request.path.startswith("/api/method/frappe.realtime."):
+        return
+    network = frappe.get_cached_doc("VPN Network")
+    if network.needs_vpn(user) and not network.request_over_vpn():
+        raise frappe.PermissionError(_("Use the VPN to reach this site"))
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])  # nosemgrep
+def login_via_key(key: str):
+    """Overrides Frappe's sign-in link, which must stay open to guests. Sends VPN-only staff to the
+    hub's VPN address before the one-time key is used, so their session starts there."""
+    from frappe.www.login import login_via_key as frappe_login_via_key
+
+    network = frappe.get_cached_doc("VPN Network")
+    user = frappe.cache.get_value(f"one_time_login_key:{key}")
+    if user and network.needs_vpn(user) and not network.request_over_vpn() and network.desk_url():
+        frappe.local.response["type"] = "redirect"
+        frappe.local.response["location"] = (
+            f"{network.desk_url()}/api/method/frappe.www.login.login_via_key?{urlencode({'key': key})}"
+        )
+        return
+    frappe_login_via_key(key)
 
 
 def refresh_statuses():

@@ -83,6 +83,8 @@ class MembershipTests(unittest.TestCase):
                 "hub_digest": None,
                 "stale_minutes": 5,
                 "access_control": 0,
+                "vpn_only_desk": 0,
+                "onboarding_minutes": 30,
             },
         )
         for email in (ENGINEER, OTHER, HUB, SPOKE):
@@ -267,6 +269,70 @@ class MembershipTests(unittest.TestCase):
         ):
             with self.assertRaises(error):
                 action()
+
+    @staticmethod
+    def api_headers(user):
+        frappe.set_user("Administrator")
+        doc = frappe.get_doc("User", user)
+        doc.api_key, secret = frappe.generate_hash(length=16), frappe.generate_hash(length=32)
+        doc.api_secret = secret
+        doc.save()
+        frappe.db.commit()
+        return {"Authorization": f"token {doc.api_key}:{secret}"}
+
+    def test_vpn_only_desk_keeps_staff_on_the_vpn(self):
+        manager, engineer, host = (self.api_headers(user) for user in (MANAGER, ENGINEER, HUB))
+        self.save_network(vpn_only_desk=1)
+        path = "/api/method/frappe.auth.get_logged_user"
+        public, vpn = {"X-Real-IP": "203.0.113.9"}, {"X-Real-IP": "100.100.64.9"}
+
+        def status(headers, **extra):
+            with (
+                self.http(use_cookies=False) as client,
+                client.get(path, headers={**headers, **extra}) as response,
+            ):
+                return response.status_code
+
+        self.assertEqual(status(manager, **public), 403)
+        self.assertEqual(status(manager, **public, **{"X-Forwarded-For": "100.100.64.9"}), 403)
+        self.assertEqual(status(manager), 403)
+        self.assertEqual(status(manager, **vpn), 200)
+        self.assertEqual(status(host, **public), 200)
+        self.assertEqual(status(engineer, **public), 200)
+        self.device()
+        self.assertEqual(status(engineer, **public), 200)
+        with patch(f"{MODULE}.now_datetime", return_value=add_to_date(now_datetime(), minutes=31)):
+            self.assertEqual(status(engineer, **public), 403)
+            self.assertEqual(status(engineer, **vpn), 200)
+        self.save_network(vpn_only_desk=0)
+        self.assertEqual(status(manager, **public), 200)
+
+    def test_sign_in_links_move_vpn_only_staff_to_the_vpn(self):
+        self.save_network(vpn_only_desk=1)
+
+        def open_link(user, address):
+            key = frappe.generate_hash()
+            frappe.cache.set_value(f"one_time_login_key:{key}", user, expires_in_sec=600)
+            path = "/api/method/frappe.www.login.login_via_key"
+            with self.http(use_cookies=False) as client:
+                response = client.get(path, query_string={"key": key}, headers={"X-Real-IP": address})
+                location, used = (
+                    response.headers.get("Location", ""),
+                    not frappe.cache.get_value(f"one_time_login_key:{key}"),
+                )
+                response.close()
+            return key, location, used
+
+        key, location, used = open_link(MANAGER, "203.0.113.9")
+        self.assertEqual(
+            location, f"http://{self.hub.address}/api/method/frappe.www.login.login_via_key?key={key}"
+        )
+        self.assertFalse(used)
+        _, location, used = open_link(MANAGER, "100.100.64.9")
+        self.assertTrue(used)
+        self.assertNotIn(self.hub.address, location)
+        _, location, used = open_link(ENGINEER, "203.0.113.9")
+        self.assertTrue(used)
 
     def test_managers_are_told_about_new_devices(self):
         with patch("frappe.email.doctype.notification.notification.enqueue_create_notification") as alerts:

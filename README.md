@@ -24,7 +24,7 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/internal_vpn/doctype/vpn_access` | Grants one engineer's devices access to one server, optionally limited to ports |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
-| `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |
+| `deploy/` | systemd units, hub firewall, sudoers rule, the VPN Desk entrance for nginx, and the [host guide](deploy/README.md) |
 
 ## Roles
 
@@ -59,6 +59,6 @@ Use a bench Python. Database tests run only with a throwaway site that has this 
 
 ## Open work
 
-- Restrict internal endpoints of Central, Atlas and Cargo to the VPN.
+- Restrict internal endpoints of Central, Atlas and Cargo to the VPN, as [VPN-only Desk](deploy/README.md#vpn-only-desk) does for this site.
 - Install the agent through host provisioning.
 - Send metrics to Datum and alert through Insights and Raven.
