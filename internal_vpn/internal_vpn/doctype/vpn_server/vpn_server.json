@@ -108,5 +108,11 @@
   "title_field": "label",
   "show_title_field_in_link": 1,
   "search_fields": "label,address,user",
-  "track_changes": 1
+  "track_changes": 1,
+  "links": [
+    {
+      "link_doctype": "VPN Access",
+      "link_fieldname": "server"
+    }
+  ]
 }

@@ -37,6 +37,7 @@ class TopologyTests(unittest.TestCase):
     def network(self, revision=1):
         network = VPNNetwork.__new__(VPNNetwork)
         network.subnet, network.revision, network.hub_endpoint = SUBNET, revision, self.endpoint
+        network.access_control = 0
         return network
 
     def configuration(self, peer, members=None, revision=1):

@@ -22,6 +22,7 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 | `internal_vpn/internal_vpn/doctype/vpn_server` | A hub or service host: key, enablement, configuration, reports, status |
 | `internal_vpn/internal_vpn/notification` | **VPN Server Health** tells managers when a server turns Failed or Stale and when it recovers. **VPN Device Registered** tells them about every new device |
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
+| `internal_vpn/internal_vpn/doctype/vpn_access` | Grants one engineer's devices access to one server, optionally limited to ports |
 | `internal_vpn/host.py` | Host agent (`update`, `measure`). Standard library only |
 | `deploy/` | systemd units, hub firewall, sudoers rule and the [host guide](deploy/README.md) |
 
@@ -31,13 +32,13 @@ In Desk, **Internal VPN** opens the device list. Servers and devices use the sta
 
 | Role | Can |
 | --- | --- |
-| VPN Manager | Edit the network settings, invite engineers, view status. Create, edit and delete servers. Edit and delete any device |
+| VPN Manager | Edit the network settings, invite engineers, grant VPN Access, view status. Create, edit and delete servers. Edit and delete any device |
 | VPN Engineer | Create, edit and delete their own devices |
 | VPN Host | Fetch its server's configuration and report back, through the `agent` right on its shared VPN Server. One user per server |
 
 A member keeps its address until deleted, and can be deleted only when disabled and after the hub has applied that. The network holds one hub and up to 10,000 other members.
 
-The hub enforces who reaches whom: servers reach each other, members reach servers, and nothing on the VPN can open a connection to a device.
+The hub enforces who reaches whom: servers reach each other, devices reach servers, and nothing on the VPN can open a connection to a device. With **Access Control** on VPN Network, a device reaches only the servers its owner is granted in VPN Access, on the granted ports.
 
 ## Install
 
@@ -58,7 +59,6 @@ Use a bench Python. Database tests run only with a throwaway site that has this 
 
 ## Open work
 
-- Per-engineer access to services.
 - Restrict internal endpoints of Central, Atlas and Cargo to the VPN.
 - Install the agent through host provisioning.
 - Send metrics to Datum and alert through Insights and Raven.

@@ -9,6 +9,7 @@
     "hub",
     "hub_endpoint",
     "stale_minutes",
+    "access_control",
     "revision",
     "hub_digest"
   ],
@@ -40,6 +41,12 @@
       "default": "5",
       "non_negative": 1,
       "description": "A server that has not reported for this long is Stale, and managers are notified."
+    },
+    {
+      "fieldname": "access_control",
+      "label": "Access Control",
+      "fieldtype": "Check",
+      "description": "When on, engineer devices reach only the servers granted in VPN Access. Servers always reach each other."
     },
     {
       "fieldname": "revision",

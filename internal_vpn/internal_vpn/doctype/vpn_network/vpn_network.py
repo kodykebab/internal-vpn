@@ -24,6 +24,7 @@ class VPNNetwork(Document):
     if TYPE_CHECKING:
         from frappe.types import DF
 
+        access_control: DF.Check
         hub: DF.Link | None
         hub_digest: DF.Data | None
         hub_endpoint: DF.Data | None
@@ -48,7 +49,10 @@ class VPNNetwork(Document):
         if self.hub_endpoint:
             self.hub_endpoint = parse(WireGuard.parse_endpoint, self.hub_endpoint)
         self.validate_hub(before.hub)
-        if any(self.get(field) != before.get(field) for field in ("subnet", "hub", "hub_endpoint")):
+        if any(
+            self.get(field) != before.get(field)
+            for field in ("subnet", "hub", "hub_endpoint", "access_control")
+        ):
             self.revision = cint(self.revision) + 1
             self.hub_digest = None
             self.enqueue_hub_apply()
@@ -211,16 +215,34 @@ class VPNNetwork(Document):
             "address": member.address,
             "public_key": member.public_key,
             "peers": peers,
-            "access": {
-                "services": [
-                    peer.address
-                    for name, peer in members.items()
-                    if peer.doctype == "VPN Server" and name != hub.name
-                ]
-            }
-            if is_hub
-            else None,
+            "access": self.build_access(hub, members) if is_hub else None,
         }
+
+    def build_access(self, hub, members) -> dict:
+        """Hub rules: servers reach each other, devices reach servers, and nothing opens a device.
+        With access control on, a device reaches only the servers its owner is granted in VPN Access."""
+        services = [
+            peer for name, peer in members.items() if peer.doctype == "VPN Server" and name != hub.name
+        ]
+        access = {
+            "restricted": bool(self.access_control),
+            "services": [s.address for s in services],
+            "rules": [],
+        }
+        if not self.access_control:
+            return access
+        grants = {
+            (grant.server, grant.user): grant.ports or ""
+            for grant in frappe.get_all("VPN Access", fields=["server", "user", "ports"], limit=0)
+        }
+        for device in (peer for peer in members.values() if peer.doctype == "VPN Device"):
+            for service in services:
+                ports = grants.get((service.name, device.owner))
+                if ports is not None:
+                    access["rules"].append(
+                        {"source": device.address, "destination": service.address, "ports": ports}
+                    )
+        return access
 
     def on_user_change(self, user, method: str):
         """Track owner eligibility changes; keep the hub eligible."""

@@ -27,6 +27,8 @@ SNAPSHOT_FIELDS = {
     "access",
 }
 PEER_FIELDS = {"public_key", "address", "endpoint", "allowed_ips"}
+ACCESS_FIELDS = {"restricted", "services", "rules"}
+RULE_FIELDS = {"source", "destination", "ports"}
 ACCESS_TABLE = "inet internal_vpn_access"
 # Absolute paths, so a hub sudoers rule can name the exact commands.
 WG, NFT, SUDO = "/usr/bin/wg", "/usr/sbin/nft", "/usr/bin/sudo"
@@ -121,6 +123,28 @@ class WireGuard:
         ):
             raise ValueError("Invalid endpoint")
         return f"[{address}]:{int(port)}" if address.version == 6 else f"{address}:{int(port)}"
+
+    @staticmethod
+    def parse_ports(value) -> str:
+        """`""` for all ports, else merged ports and ranges such as `22,443,8000-8005`."""
+        if not isinstance(value, str):
+            raise TypeError("Expected ports")
+        ranges = []
+        for part in [part.strip() for part in value.split(",") if part.strip()]:
+            low, _, high = part.partition("-")
+            if not low.isdecimal() or (high and not high.isdecimal()):
+                raise ValueError("Invalid ports")
+            low, high = int(low), int(high or low)
+            if not 1 <= low <= high <= 65535:
+                raise ValueError("Invalid ports")
+            ranges.append((low, high))
+        merged = []
+        for low, high in sorted(ranges):
+            if merged and low <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], high)
+            else:
+                merged.append([low, high])
+        return ",".join(f"{low}-{high}" if high > low else str(low) for low, high in merged)
 
     @staticmethod
     def digest(snapshot: dict) -> str:
@@ -252,7 +276,7 @@ class Host:
         self.validate_access(snapshot)
 
     def validate_access(self, snapshot: dict):
-        """The hub always gets the server list; spokes get none."""
+        """The hub always gets rules and spokes none; every address and port list must be well formed."""
         access = snapshot["access"]
         if snapshot["topology"] == "spoke":
             if access is not None:
@@ -260,12 +284,22 @@ class Host:
             return
         if (
             not isinstance(access, dict)
-            or set(access) != {"services"}
+            or set(access) != ACCESS_FIELDS
+            or type(access["restricted"]) is not bool
             or not isinstance(access["services"], list)
+            or not isinstance(access["rules"], list)
+            or (access["rules"] and not access["restricted"])
         ):
             raise ValueError("Invalid access rules")
         for address in access["services"]:
             WireGuard.parse_address(address, self.subnet)
+        for rule in access["rules"]:
+            if not isinstance(rule, dict) or set(rule) != RULE_FIELDS:
+                raise ValueError("Invalid access rules")
+            WireGuard.parse_address(rule["source"], self.subnet)
+            WireGuard.parse_address(rule["destination"], self.subnet)
+            if WireGuard.parse_ports(rule["ports"]) != rule["ports"]:
+                raise ValueError("Invalid access rules")
 
     @staticmethod
     def accept_revision(path: Path, revision: int, digest: str):
@@ -326,15 +360,25 @@ class Host:
 
     def apply_access(self, access: dict):
         """Replace the hub's member-to-member rules in one nft transaction. Servers reach each other,
-        members reach servers, and nothing opens a device."""
+        devices reach servers (only granted ones when restricted), and nothing opens a device."""
         link = f'iifname "{self.wireguard.interface}" oifname "{self.wireguard.interface}"'
         rules = [f"{link} ct state established,related accept"]
         if access["services"]:
             services = f"{{ {', '.join(access['services'])} }}"
-            rules += [
-                f"{link} ip saddr {services} ip daddr {services} accept",
-                f"{link} ip daddr {services} accept",
-            ]
+            rules.append(f"{link} ip saddr {services} ip daddr {services} accept")
+            if not access["restricted"]:
+                rules.append(f"{link} ip daddr {services} accept")
+        for rule in access["rules"]:
+            match = f"{link} ip saddr {rule['source']} ip daddr {rule['destination']}"
+            if rule["ports"]:
+                ports = rule["ports"].replace(",", ", ")
+                rules += [
+                    f"{match} tcp dport {{ {ports} }} accept",
+                    f"{match} udp dport {{ {ports} }} accept",
+                    f"{match} icmp type echo-request accept",
+                ]
+            else:
+                rules.append(f"{match} accept")
         rules.append(f"{link} counter drop")
         body = "".join(f"\t\t{rule}\n" for rule in rules)
         self.wireguard.execute(
