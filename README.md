@@ -51,11 +51,19 @@ The hub enforces who reaches whom: servers reach each other, devices reach serve
 
 ## Tests
 
+DocType tests use Frappe's `IntegrationTestCase` and run with the bench:
+
+```sh
+bench --site <test site> run-tests --app internal_vpn
+```
+
+Tests in `tests/` need what that runner cannot give: real HTTP requests, several connections at once, and Frappe's Version history, which its runner turns off. Run them with a bench Python:
+
 ```sh
 PYTHONPATH=.:tests python -m unittest discover -s tests
 ```
 
-Use a bench Python. Database tests run only with a throwaway site that has this app and `internal_vpn_test_site: 1`. Set `VPN_TEST_SITE` and an absolute `VPN_TEST_SITES_PATH`. They wipe VPN records.
+The host agent tests need no site. The others need a throwaway site with this app and `internal_vpn_test_site: 1`; set `VPN_TEST_SITE` and an absolute `VPN_TEST_SITES_PATH`. Both kinds wipe VPN records.
 
 ## Open work
 

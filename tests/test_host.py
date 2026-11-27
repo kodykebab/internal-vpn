@@ -85,7 +85,9 @@ class UpdateTests(unittest.TestCase):
             with self.subTest(snapshot=snapshot), self.assertRaises((TypeError, ValueError)):
                 self.host.validate(snapshot)
 
-    def test_endpoint_parser_rejects_commands_and_ports(self):
+    def test_endpoint_parser_normalizes_and_rejects_commands_and_ports(self):
+        self.assertEqual(WireGuard.parse_endpoint("192.0.2.1:051820"), "192.0.2.1:51820")
+        self.assertEqual(WireGuard.parse_endpoint("[2001:DB8:0::0001]:51820"), "[2001:db8::1]:51820")
         for endpoint in (
             "host;echo bad:123",
             "192.0.2.2:65536",
@@ -101,11 +103,7 @@ class UpdateTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint), self.assertRaises((TypeError, ValueError)):
                 WireGuard.parse_endpoint(endpoint)
 
-    def test_endpoint_parser_normalizes_ipv4_and_ipv6(self):
-        self.assertEqual(WireGuard.parse_endpoint("192.0.2.1:051820"), "192.0.2.1:51820")
-        self.assertEqual(WireGuard.parse_endpoint("[2001:DB8:0::0001]:51820"), "[2001:db8::1]:51820")
-
-    def test_revision_survives_restart_rejects_stale_and_conflict(self):
+    def test_revision_survives_restart_and_stale_snapshots_never_reach_wireguard(self):
         path = self.state / "revision.json"
         Host.accept_revision(path, 3, "three")
         Host.accept_revision(path, 3, "three")
@@ -114,6 +112,11 @@ class UpdateTests(unittest.TestCase):
                 Host.accept_revision(path, revision, digest)
         Host.accept_revision(path, 4, "four")
         self.assertEqual(json.loads(path.read_text())["revision"], 4)
+        # A restart that fetches an older snapshot neither applies nor reports it.
+        with self.assertRaises(ValueError):
+            self.update()
+        self.applied.assert_not_called()
+        self.reported.assert_not_called()
 
     def apply(self, *rows, host=None, snapshot=SNAPSHOT):
         """Apply over live `wg show` rows of (key, allowed IPs, endpoint, keepalive)."""
@@ -245,13 +248,6 @@ class UpdateTests(unittest.TestCase):
             self.update(apply=OSError)
         self.assertEqual(json.loads((self.state / "revision.json").read_text())["revision"], 3)
         self.reported.assert_called_once_with(3, None)
-
-    def test_stale_response_after_restart_never_reaches_wireguard(self):
-        Host.accept_revision(self.state / "revision.json", 4, "newer")
-        with self.assertRaises(ValueError):
-            self.update()
-        self.applied.assert_not_called()
-        self.reported.assert_not_called()
 
     def test_unavailable_control_plane_does_not_apply_cached_membership(self):
         with (
