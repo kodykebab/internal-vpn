@@ -53,6 +53,9 @@ jobs:
       APP_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Install Pilot
         run: |
           curl -fsSL https://raw.githubusercontent.com/frappe/pilot/develop/install.sh | bash
@@ -79,4 +82,4 @@ jobs:
             ../env/bin/python -m unittest test_host test_network test_requests
       - name: Bench log
         if: failure()
-        run: tail -100 "$RUNNER_TEMP/bench.log"
+        run: tail -100 "$RUNNER_TEMP/bench.log" 2>/dev/null || true
