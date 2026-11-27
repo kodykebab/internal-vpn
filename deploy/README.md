@@ -73,7 +73,7 @@ The firewall loads before `ivpn0`. It blocks hub services from members and start
 
 ## Bring up
 
-1. In **VPN Network**, set the subnet.
+1. In **VPN Network**, keep the default subnet `100.100.0.0/20` (4,094 members) or set another inside `100.64.0.0/10`. It is fixed once servers or devices exist.
 2. Create a VPN Server for the hub and paste its public key. Set up its host as above. In **VPN Network**, set **Hub** and **Hub Endpoint**.
 3. Create a VPN Server for each spoke and run its enrollment command on the spoke.
 

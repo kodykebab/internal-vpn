@@ -20,7 +20,8 @@
       "fieldname": "subnet",
       "label": "Subnet",
       "fieldtype": "Data",
-      "description": "Inside 100.64.0.0/10. Fixed once set."
+      "default": "100.100.0.0/20",
+      "description": "Inside 100.64.0.0/10. The default holds 4,094 members. Fixed once servers or devices exist."
     },
     {
       "fieldname": "hub",

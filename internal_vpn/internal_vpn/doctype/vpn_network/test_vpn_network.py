@@ -206,6 +206,15 @@ class TestVPNNetwork(VPNTestCase):
         with self.assertRaises(frappe.PermissionError):
             self.save_network(actor=ENGINEER, hub_endpoint="192.0.2.9:51820")
 
+    def test_subnet_has_a_default_and_is_fixed_once_members_exist(self):
+        frappe.db.delete("VPN Server")
+        frappe.db.delete("Singles", {"doctype": "VPN Network"})  # as on a new site
+        self.assertEqual(frappe.get_doc("VPN Network").subnet, "100.100.0.0/20")
+        self.assertEqual(self.save_network(subnet="100.101.0.0/18").subnet, "100.101.0.0/18")
+        self.server(SPOKE, key(2))
+        with self.assertRaises(frappe.ValidationError):
+            self.save_network(subnet="100.100.0.0/20")
+
     def test_managers_invite_engineers(self):
         email = f"vpn-invited-{frappe.generate_hash(length=8)}@example.test"
 

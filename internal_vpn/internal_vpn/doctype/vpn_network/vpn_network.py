@@ -51,8 +51,10 @@ class VPNNetwork(Document):
             self.set(field, locked.get(field))
         if self.subnet:
             self.subnet = str(parse(WireGuard.parse_subnet, self.subnet))
-        if before.subnet and self.subnet != before.subnet:
-            frappe.throw(_("Readdressing an existing network is not supported"))
+        if self.subnet != before.subnet and any(
+            frappe.db.get_value(doctype, {}, for_update=True) for doctype in MEMBER_ROLES
+        ):
+            frappe.throw(_("Change the subnet before adding servers or devices"))
         if self.hub_endpoint:
             self.hub_endpoint = parse(WireGuard.parse_endpoint, self.hub_endpoint)
         self.validate_hub(before.hub)
