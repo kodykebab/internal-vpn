@@ -168,6 +168,7 @@ class MembershipTests(unittest.TestCase):
             revision=snapshot["revision"],
             success=True,
             digest=WireGuard.digest(snapshot),
+            agent=WireGuard.agent_digest(),
         )
 
     def hub_status(self):
@@ -420,6 +421,114 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(run(now + 30), first)
         self.assertGreater(run(now + 120), first)
 
+    def test_outdated_spoke_agents_are_flagged(self):
+        atlas = self.server(SPOKE, key(2), label="atlas")
+        self.report_hub()
+
+        def report(**agent):
+            snapshot = self.call(SPOKE, "VPN Server", atlas.name, "get_configuration")
+            self.call(
+                SPOKE,
+                "VPN Server",
+                atlas.name,
+                "report",
+                revision=snapshot["revision"],
+                success=True,
+                digest=WireGuard.digest(snapshot),
+                **agent,
+            )
+            frappe.db.rollback()
+            return frappe.db.get_value("VPN Server", atlas.name, "agent_outdated")
+
+        self.assertEqual(report(agent=WireGuard.agent_digest()), 0)
+        self.assertEqual(report(agent="0" * 64), 1)
+        with self.assertRaises(TypeError):
+            report()
+        self.assertEqual(frappe.db.get_value("VPN Server", self.hub.name, "agent_outdated"), 0)
+
+    def new_server(self, label="atlas"):
+        return self.act(MANAGER, lambda: frappe.get_doc({"doctype": "VPN Server", "label": label}).insert())
+
+    def enrollment(self, name, actor=MANAGER):
+        def load():
+            doc = frappe.get_doc("VPN Server", name)
+            doc.run_method("onload")
+            return doc.get_onload().get("enrollment")
+
+        return self.act(actor, load)
+
+    def peers(self):
+        return [peer["address"] for peer in self.hub_configuration()["peers"]]
+
+    def test_servers_enroll_once_with_the_command_from_their_form(self):
+        server = self.new_server()
+        host = server.user
+        self.assertIn("VPN Host", frappe.get_roles(host))
+        self.assertEqual(frappe.db.get_value("User", host, "user_type"), "Website User")
+        self.assertNotIn(server.address, self.peers())
+        enrollment = self.enrollment(server.name)
+        self.assertFalse(enrollment["expired"])
+        self.assertIn("enroll --url http", enrollment["command"])
+        self.assertIn(f"--server {server.name}", enrollment["command"])
+        old_secret = frappe.get_doc("User", host).get_password("api_secret")
+        self.assertIn(old_secret, enrollment["command"])
+
+        revision = self.revision()
+        result = self.call(host, "VPN Server", server.name, "enroll", public_key=key(7))
+        self.assertEqual(
+            (result["address"], result["subnet"], result["hub_public_key"]),
+            (server.address, "100.100.64.0/24", key(1)),
+        )
+        new_secret = frappe.get_doc("User", host).get_password("api_secret")
+        self.assertNotEqual(new_secret, old_secret)
+        self.assertEqual(result["token"].split(":")[1], new_secret)
+        self.assertEqual(self.revision(), revision + 1)
+        self.assertIn(server.address, self.peers())
+        with self.assertRaises(frappe.ValidationError):
+            self.call(host, "VPN Server", server.name, "enroll", public_key=key(8))
+        self.assertIsNone(self.enrollment(server.name))
+
+    def test_enrollment_is_refused_late_for_the_hub_and_restarts_on_request(self):
+        server = self.new_server()
+        later = add_to_date(now_datetime(), minutes=31)
+        with patch(
+            "internal_vpn.internal_vpn.doctype.vpn_server.vpn_server.now_datetime", return_value=later
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                self.call(server.user, "VPN Server", server.name, "enroll", public_key=key(7))
+            self.assertTrue(self.enrollment(server.name)["expired"])
+        with self.assertRaises(frappe.ValidationError):
+            self.call(HUB, "VPN Server", self.hub.name, "enroll", public_key=key(8))
+        with self.assertRaises(frappe.PermissionError):
+            self.call(server.user, "VPN Server", server.name, "new_enrollment")
+
+        self.call(server.user, "VPN Server", server.name, "enroll", public_key=key(7))
+        self.call(MANAGER, "VPN Server", server.name, "new_enrollment")
+        self.assertIsNone(frappe.db.get_value("VPN Server", server.name, "public_key"))
+        self.assertNotIn(server.address, self.peers())
+        self.assertFalse(self.enrollment(server.name)["expired"])
+        self.call(server.user, "VPN Server", server.name, "enroll", public_key=key(9))
+        self.assertIn(server.address, self.peers())
+
+    def test_agent_download_is_for_its_own_host(self):
+        server = self.new_server()
+        other = self.new_server("cargo")
+        import internal_vpn.host
+
+        def headers(name):
+            user = frappe.get_doc("User", frappe.db.get_value("VPN Server", name, "user"))
+            return {"Authorization": f"token {user.api_key}:{user.get_password('api_secret')}"}
+
+        path = "/api/method/run_doc_method"
+        query = {"dt": "VPN Server", "dn": server.name, "method": "agent"}
+        own, foreign = headers(server.name), headers(other.name)
+        with self.http(use_cookies=False) as client:
+            with client.get(path, query_string=query, headers=own) as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_data(), Path(internal_vpn.host.__file__).read_bytes())
+            with client.get(path, query_string=query, headers=foreign) as response:
+                self.assertEqual(response.status_code, 403)
+
     def test_capacity_reserves_disabled_members_and_delete_frees_it(self):
         with patch(f"{MODULE}.MAX_PEERS", 1):
             device = self.device()
@@ -628,7 +737,15 @@ class MembershipTests(unittest.TestCase):
         revision = self.revision()
         for value in (revision - 1, revision + 1):
             with self.subTest(revision=value), self.assertRaises(frappe.ValidationError):
-                self.call(HUB, "VPN Server", self.hub.name, "report", revision=value, success=False)
+                self.call(
+                    HUB,
+                    "VPN Server",
+                    self.hub.name,
+                    "report",
+                    revision=value,
+                    success=False,
+                    agent=WireGuard.agent_digest(),
+                )
         self.assertEqual(self.hub_status(), "Current")
 
     def test_http_host_authentication_and_method_restrictions(self):
@@ -655,6 +772,7 @@ class MembershipTests(unittest.TestCase):
                     "revision": snapshot["revision"],
                     "success": True,
                     "digest": WireGuard.digest(snapshot),
+                    "agent": WireGuard.agent_digest(),
                 },
             )
             with client.post(path, json=payload, headers=headers) as response:
@@ -741,7 +859,15 @@ class MembershipTests(unittest.TestCase):
             )
 
             alerts.reset_mock()
-            self.call(HUB, "VPN Server", self.hub.name, "report", revision=self.revision(), success=False)
+            self.call(
+                HUB,
+                "VPN Server",
+                self.hub.name,
+                "report",
+                revision=self.revision(),
+                success=False,
+                agent=WireGuard.agent_digest(),
+            )
             self.assertEqual(statuses()[self.hub.name], "Failed")
             self.assertEqual(
                 [call.args[1]["subject"] for call in alerts.call_args_list], ["VPN server service is Failed"]

@@ -38,32 +38,15 @@ Replace `frappe` with the bench user, in both places. The sudoers rule lets that
 
 ## Install on spokes
 
-```sh
-sudo install -d -m 0755 /opt/internal-vpn
-sudo install -m 0644 internal_vpn/host.py /opt/internal-vpn/
-sudo install -m 0644 deploy/internal-vpn-update.service deploy/internal-vpn-update.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now internal-vpn-update.timer
-```
+1. Create a VPN Server with a name. The app creates its host user (VPN Host only, no Desk access) and an API key, and shows an enrollment command on the form for 30 minutes.
+2. Run that command as root on the spoke, or put it in the server's cloud-init user data. It downloads this app's `host.py` with the server's token, makes the WireGuard keys on the host, and enrolls with the public key only.
+3. Enrollment writes `/etc/wireguard/ivpn0.conf` and `/etc/internal-vpn/host.json` (root only), installs the agent in `/opt/internal-vpn` with its systemd timer, and brings `ivpn0` up. It replaces the token, so the command works once.
 
-Write `/etc/internal-vpn/host.json`, owned by root, mode `0600`:
-
-| Field | Value |
-| --- | --- |
-| `name` | VPN Server name |
-| `address`, `subnet`, `public_key` | From the VPN Server |
-| `interface` | `ivpn0` |
-| `topology` | `spoke` |
-| `hub_public_key` | The hub's key |
-| `url`, `token`, `ca_file` | App URL, the host user's `api_key:api_secret`, optional CA file |
-
-Give each host user only the VPN Host role, which has no Desk access. Optionally set **Restrict IP** on it to the host's address.
-
-Run the same `host.py` version as the app on every spoke. The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`, as on the hub.
+The timer runs the agent 15 seconds after each run. Keep `/var/lib/internal-vpn`, as on the hub. If the window closes or the host is rebuilt, use **New Enrollment** on the form. Optionally set **Restrict IP** on the host user to the host's address. A host that is not on systemd or has no `curl` can still run the same steps by hand.
 
 ## Start at boot
 
-On every host, `/etc/wireguard/ivpn0.conf`, root, mode `0600`:
+Enrollment writes this file on spokes. On the hub, write `/etc/wireguard/ivpn0.conf` yourself, root, mode `0600`:
 
 ```ini
 [Interface]
@@ -72,7 +55,7 @@ Address = <address from registration>/<subnet prefix>
 ListenPort = 51820
 ```
 
-Keep `ListenPort` on the hub only. Leave out `[Peer]` sections: the app and the agent manage peers. Enable it with `sudo systemctl enable --now wg-quick@ivpn0`.
+Leave out `[Peer]` sections: the app manages them. Enable it with `sudo systemctl enable --now wg-quick@ivpn0`.
 
 On the hub, set the interface and subnet in [hub.nft](hub.nft), then:
 
@@ -91,8 +74,8 @@ The firewall loads before `ivpn0`. It blocks hub services from members and start
 ## Bring up
 
 1. In **VPN Network**, set the subnet.
-2. Create a VPN Server for the hub and set up its host. In **VPN Network**, set **Hub** and **Hub Endpoint**.
-3. Create a VPN Server for each spoke and set up its host.
+2. Create a VPN Server for the hub and paste its public key. Set up its host as above. In **VPN Network**, set **Hub** and **Hub Endpoint**.
+3. Create a VPN Server for each spoke and run its enrollment command on the spoke.
 
 ## Operate
 
@@ -105,7 +88,8 @@ The firewall loads before `ivpn0`. It blocks hub services from members and start
 | Limit access | Create a VPN Access record per engineer and server, with ports if needed. Then turn on **Access Control** on VPN Network. Until then, every device reaches every server. |
 | Revoke a user | Disable the user or remove their VPN role. |
 | Free an address | Delete a disabled member after the hub has applied the change. |
-| Rotate a key | Change **WireGuard Public Key**, install the new private key on `ivpn0`, update `public_key` in `host.json`. For the hub, also update `hub_public_key` on every spoke. |
+| Rotate a key | For a device, **New Configuration**. For a spoke, **New Enrollment**, then run the new command on it. For the hub, change **WireGuard Public Key**, install the new private key on `ivpn0`, and update `hub_public_key` on every spoke. |
+| Upgrade a spoke's agent | When the VPN Server list shows **Outdated Agent**, run `sudo python3 /opt/internal-vpn/host.py upgrade --config /etc/internal-vpn/host.json` on that spoke. The timer's next run uses the new agent. |
 | Rotate a host token | Change the user's API secret and `token` in `host.json`. |
 
 Agent errors print a `stage` without details. Read them in the unit journal. A failed apply is retried on the next run. Stopping the timer keeps the current peers.

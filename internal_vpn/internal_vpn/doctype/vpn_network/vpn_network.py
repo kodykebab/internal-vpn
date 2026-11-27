@@ -74,9 +74,9 @@ class VPNNetwork(Document):
             return
         if not self.subnet or not self.hub_endpoint:
             frappe.throw(_("The hub requires a subnet and a UDP endpoint"))
-        hub = frappe.db.get_value("VPN Server", self.hub, ["user", "enabled"], as_dict=True)
-        if not hub or not hub.enabled or not self.is_eligible(hub.user, "VPN Server"):
-            frappe.throw(_("The hub must be an enabled server whose user has the VPN Host role"))
+        hub = frappe.db.get_value("VPN Server", self.hub, ["user", "enabled", "public_key"], as_dict=True)
+        if not hub or not hub.enabled or not hub.public_key or not self.is_eligible(hub.user, "VPN Server"):
+            frappe.throw(_("The hub must be an enabled server with a key, whose user has the VPN Host role"))
 
     def advance_revision(self) -> int:
         self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None}, update_modified=False)
@@ -207,6 +207,7 @@ class VPNNetwork(Document):
             .on(user.name == owner)
             .select(member.star)
             .where((member.enabled == 1) & (user.enabled == 1) & owner.isin(owners_with_role))
+            .where(member.public_key.isnotnull())
         )
         if names:
             query = query.where(member.name.isin(names))
@@ -335,8 +336,9 @@ class VPNMember(Document):
         if before:
             for field in self.system_fields:
                 self.set(field, before.get(field))
-        self.public_key = parse(WireGuard.validate_public_key, self.public_key)
-        if any(
+        # A server has no key until it enrolls; devices require one in their DocType.
+        self.public_key = parse(WireGuard.validate_public_key, self.public_key) if self.public_key else None
+        if self.public_key and any(
             frappe.db.exists(doctype, {"public_key": self.public_key, "name": ("!=", self.name)})
             for doctype in MEMBER_ROLES
         ):

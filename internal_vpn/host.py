@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 VPN_RANGE = ipaddress.IPv4Network("100.64.0.0/10")
@@ -34,6 +34,54 @@ ACCESS_TABLE = "inet internal_vpn_access"
 WG, NFT, SUDO = "/usr/bin/wg", "/usr/sbin/nft", "/usr/bin/sudo"
 UNIT_FIELDS = ("LoadState", "ActiveState", "Result", "ExecMainStatus", "ExecMainExitTimestampMonotonic")
 MAX_PEERS = 10000
+# Paths a spoke uses; enrollment writes them.
+WIREGUARD_DIR = Path("/etc/wireguard")
+CONFIG_DIR = Path("/etc/internal-vpn")
+AGENT_DIR = Path("/opt/internal-vpn")
+UNIT_DIR = Path("/etc/systemd/system")
+UPDATE_SERVICE = """[Unit]
+Description=Apply current internal VPN membership
+After=network-online.target wg-quick@ivpn0.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/internal-vpn/host.py update --config /etc/internal-vpn/host.json --state /var/lib/internal-vpn
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=internal-vpn
+StateDirectoryMode=0700
+PrivateTmp=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+"""
+UPDATE_TIMER = """[Unit]
+Description=Refresh internal VPN membership
+
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=internal-vpn-update.service
+
+[Install]
+WantedBy=timers.target
+"""
 MAX_PROBES = 8
 # About 140 bytes per hub peer, so the response cap leaves room for MAX_PEERS.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -154,6 +202,11 @@ class WireGuard:
         return ",".join(f"{low}-{high}" if high > low else str(low) for low, high in merged)
 
     @staticmethod
+    def agent_digest() -> str:
+        """SHA-256 of this file. The app compares it with its own copy to find outdated agents."""
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+    @staticmethod
     def digest(snapshot: dict) -> str:
         """Identify desired state without the global revision, so unrelated membership changes keep it."""
         desired = {key: value for key, value in snapshot.items() if key != "revision"}
@@ -190,7 +243,22 @@ class ControlPlane:
 
     def report(self, revision: int, digest: str | None):
         """Report the applied digest, or None when applying failed."""
-        self._call("report", {"revision": revision, "success": digest is not None, "digest": digest})
+        args = {"revision": revision, "success": digest is not None, "digest": digest}
+        self._call("report", {**args, "agent": WireGuard.agent_digest()})
+
+    def enroll(self, public_key: str) -> dict:
+        return self._call("enroll", {"public_key": public_key})
+
+    def fetch_agent(self) -> bytes:
+        """This app's host.py, refused unless it is Python."""
+        query = urlencode({"dt": "VPN Server", "dn": self.name, "method": "agent"})
+        request = Request(f"{self.url}?{query}", headers={"Authorization": "token " + self.token})
+        with self.opener.open(request, timeout=15) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("Response too large")
+        compile(raw, "host.py", "exec")
+        return raw
 
     def _call(self, method: str, args: dict):
         body = json.dumps({"dt": "VPN Server", "dn": self.name, "method": method, "args": args}).encode()
@@ -487,6 +555,86 @@ class Host:
         }
 
 
+class Spoke:
+    """Enrollment and upgrade of a spoke. Keys are made on the host; only the public key is sent."""
+
+    def __init__(self, interface: str = "ivpn0"):
+        self.wireguard = WireGuard(interface)
+        self.stage = "preflight"
+
+    def enroll(self, url: str, name: str, token: str, ca_file: str | None = None) -> dict:
+        interface = self.wireguard.interface
+        tunnel, config = WIREGUARD_DIR / f"{interface}.conf", CONFIG_DIR / "host.json"
+        if tunnel.exists() or config.exists():
+            raise ValueError("This host is already enrolled")
+        control_plane = ControlPlane({"url": url, "name": name, "token": token, "ca_file": ca_file})
+        self.stage = "keys"
+        private_key = self.wireguard.execute(WG, "genkey").stdout.strip()
+        public_key = self.wireguard.execute(WG, "pubkey", input=private_key + "\n").stdout.strip()
+        self.stage = "enroll"
+        result = control_plane.enroll(public_key)
+        subnet = WireGuard.parse_subnet(result["subnet"])
+        address = WireGuard.parse_address(result["address"], subnet)
+        self.stage = "files"
+        CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.write(
+            tunnel,
+            f"[Interface]\nPrivateKey = {private_key}\nAddress = {address}/{subnet.prefixlen}\n",
+            0o600,
+        )
+        host = {
+            "name": name,
+            "subnet": str(subnet),
+            "address": str(address),
+            "public_key": public_key,
+            "interface": interface,
+            "topology": "spoke",
+            "hub_public_key": WireGuard.validate_public_key(result["hub_public_key"]),
+            "url": url,
+            "token": result["token"],
+        }
+        if ca_file:
+            host["ca_file"] = ca_file
+        self.write(config, json.dumps(host, indent=2) + "\n", 0o600)
+        self.write(AGENT_DIR / "host.py", Path(__file__).read_text(), 0o644)
+        self.write(UNIT_DIR / "internal-vpn-update.service", UPDATE_SERVICE, 0o644)
+        self.write(UNIT_DIR / "internal-vpn-update.timer", UPDATE_TIMER, 0o644)
+        self.stage = "start"
+        for command in (
+            ("daemon-reload",),
+            ("enable", "--now", f"wg-quick@{interface}"),
+            ("enable", "--now", "internal-vpn-update.timer"),
+        ):
+            self.wireguard.execute("/usr/bin/systemctl", *command, timeout=60)
+        return {"name": name, "address": str(address), "enrolled": True}
+
+    def upgrade(self, config: dict) -> dict:
+        self.stage = "fetch"
+        raw = ControlPlane(config).fetch_agent()
+        self.stage = "install"
+        target = AGENT_DIR / "host.py"
+        before = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+        self.write(target, raw.decode(), 0o644)
+        after = hashlib.sha256(raw).hexdigest()
+        return {"agent": after, "changed": before != after}
+
+    @staticmethod
+    def write(path: Path, text: str, mode: int):
+        """Replace a file atomically, root-owned with `mode` from the start."""
+        path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent)
+        try:
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "w") as file:
+                file.write(text)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Internal VPN host agent")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -495,20 +643,41 @@ def main():
     measure = commands.add_parser("measure", help="print a read-only measurement")
     measure.add_argument("--probe", action="append", default=[], metavar="VPN_IP")
     measure.add_argument("--unit", help="updater service unit to report")
-    for command in (update, measure):
+    upgrade = commands.add_parser("upgrade", help="install this app's current agent")
+    for command in (update, measure, upgrade):
         command.add_argument("--config", type=Path, required=True)
+    enroll = commands.add_parser("enroll", help="join the network as a spoke")
+    enroll.add_argument("--url", required=True)
+    enroll.add_argument("--server", required=True)
+    enroll.add_argument("--token", required=True)
+    enroll.add_argument("--ca-file")
     args = parser.parse_args()
 
-    host = None
+    worker = None
     try:
-        metadata = args.config.stat()
-        if os.geteuid() != 0 or metadata.st_uid != 0 or metadata.st_mode & 0o077:
-            raise ValueError("Expected root and a root-only configuration")
-        host = Host(json.loads(args.config.read_text()))
-        result = host.update(args.state) if args.command == "update" else host.measure(args.probe, args.unit)
+        if os.geteuid() != 0:
+            raise ValueError("Expected root")
+        if args.command == "enroll":
+            worker = Spoke()
+            result = worker.enroll(args.url, args.server, args.token, args.ca_file)
+        else:
+            metadata = args.config.stat()
+            if metadata.st_uid != 0 or metadata.st_mode & 0o077:
+                raise ValueError("Expected a root-only configuration")
+            config = json.loads(args.config.read_text())
+            if args.command == "upgrade":
+                worker = Spoke(config["interface"])
+                result = worker.upgrade(config)
+            else:
+                worker = Host(config)
+                result = (
+                    worker.update(args.state)
+                    if args.command == "update"
+                    else worker.measure(args.probe, args.unit)
+                )
         print(json.dumps(result))
     except Exception:  # noqa: BLE001 - never expose credentials from command or HTTP errors
-        stage = host.stage if host is not None else "configuration"
+        stage = worker.stage if worker is not None else "configuration"
         print(json.dumps({"ok": False, "error": f"{args.command} failed", "stage": stage}))
         raise SystemExit(1) from None
 

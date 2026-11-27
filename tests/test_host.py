@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from internal_vpn.host import NFT, ControlPlane, Host, NoRedirect, WireGuard, main
+import internal_vpn.host as agent
+from internal_vpn.host import NFT, ControlPlane, Host, NoRedirect, Spoke, WireGuard, main
 
 
 def key(byte):
@@ -179,6 +180,17 @@ class UpdateTests(unittest.TestCase):
         with patch.object(WireGuard, "show", return_value=f"{key(2)}\t1700000000\n{key(3)}\t0") as show:
             self.assertEqual(self.host.wireguard.handshakes(), {key(2): 1700000000, key(3): 0})
         show.assert_called_once_with("latest-handshakes")
+
+    def test_reports_carry_the_agent_digest(self):
+        import hashlib
+
+        import internal_vpn.host as agent
+
+        with patch.object(ControlPlane, "_call") as call:
+            ControlPlane(CONFIG).report(3, "a" * 64)
+        sent = call.call_args.args[1]
+        self.assertEqual(sent["agent"], hashlib.sha256(Path(agent.__file__).read_bytes()).hexdigest())
+        self.assertEqual((sent["revision"], sent["success"], sent["digest"]), (3, True, "a" * 64))
 
     def test_removal_precedes_updates_and_private_key_is_untouched(self):
         calls = self.apply((key(3), "100.100.64.3/32", "(none)", "off"))
@@ -384,3 +396,103 @@ class MeasureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpokeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.paths = {name: root / name for name in ("wireguard", "config", "agent", "units")}
+        for name, attribute in (
+            ("wireguard", "WIREGUARD_DIR"),
+            ("config", "CONFIG_DIR"),
+            ("agent", "AGENT_DIR"),
+            ("units", "UNIT_DIR"),
+        ):
+            patcher = patch.object(agent, attribute, self.paths[name])
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.commands = []
+
+        def execute(_, *command, input=None, **kwargs):
+            self.commands.append(command)
+            output = {"genkey": "private-key", "pubkey": key(5)}.get(
+                command[1] if len(command) > 1 else "", ""
+            )
+            return SimpleNamespace(stdout=output + "\n", returncode=0)
+
+        patcher = patch.object(WireGuard, "execute", execute)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.response = {
+            "subnet": "100.100.64.0/24",
+            "address": "100.100.64.7",
+            "hub_public_key": key(1),
+            "token": "key:rotated",
+        }
+
+    def test_enroll_writes_the_host_and_starts_it(self):
+        with patch.object(ControlPlane, "enroll", return_value=self.response) as enroll:
+            result = Spoke().enroll("https://vpn.example", "server-7", "key:once")
+        enroll.assert_called_once_with(key(5))
+        self.assertEqual(result, {"name": "server-7", "address": "100.100.64.7", "enrolled": True})
+        tunnel = self.paths["wireguard"] / "ivpn0.conf"
+        self.assertEqual(
+            tunnel.read_text(), "[Interface]\nPrivateKey = private-key\nAddress = 100.100.64.7/24\n"
+        )
+        config = json.loads((self.paths["config"] / "host.json").read_text())
+        self.assertEqual(
+            {k: config[k] for k in ("name", "address", "public_key", "topology", "hub_public_key", "token")},
+            {
+                "name": "server-7",
+                "address": "100.100.64.7",
+                "public_key": key(5),
+                "topology": "spoke",
+                "hub_public_key": key(1),
+                "token": "key:rotated",
+            },
+        )
+        for path, mode in (
+            (tunnel, 0o600),
+            (self.paths["config"] / "host.json", 0o600),
+            (self.paths["agent"] / "host.py", 0o644),
+            (self.paths["units"] / "internal-vpn-update.timer", 0o644),
+        ):
+            self.assertEqual(path.stat().st_mode & 0o777, mode, path)
+        self.assertEqual((self.paths["agent"] / "host.py").read_bytes(), Path(agent.__file__).read_bytes())
+        self.assertEqual(
+            [command for command in self.commands if command[0] == "/usr/bin/systemctl"],
+            [
+                ("/usr/bin/systemctl", "daemon-reload"),
+                ("/usr/bin/systemctl", "enable", "--now", "wg-quick@ivpn0"),
+                ("/usr/bin/systemctl", "enable", "--now", "internal-vpn-update.timer"),
+            ],
+        )
+
+    def test_enroll_refuses_an_enrolled_host_before_calling_the_app(self):
+        self.paths["config"].mkdir()
+        (self.paths["config"] / "host.json").write_text("{}")
+        with patch.object(ControlPlane, "enroll") as enroll, self.assertRaises(ValueError):
+            Spoke().enroll("https://vpn.example", "server-7", "key:once")
+        enroll.assert_not_called()
+        self.assertEqual(self.commands, [])
+
+    def test_upgrade_replaces_the_agent(self):
+        self.paths["agent"].mkdir()
+        (self.paths["agent"] / "host.py").write_text("old = 1\n")
+        with patch.object(ControlPlane, "fetch_agent", return_value=b"new = 2\n"):
+            result = Spoke().upgrade(dict(CONFIG))
+        self.assertTrue(result["changed"])
+        self.assertEqual((self.paths["agent"] / "host.py").read_text(), "new = 2\n")
+
+    def test_agent_download_must_be_python(self):
+        response = io.BytesIO(b"<html>error</html>")
+        response.__enter__ = lambda *a: response
+        response.__exit__ = lambda *a: None
+        control_plane = ControlPlane(CONFIG)
+        with (
+            patch.object(control_plane.opener, "open", return_value=response),
+            self.assertRaises(SyntaxError),
+        ):
+            control_plane.fetch_agent()

@@ -10,13 +10,15 @@
     "public_key",
     "address",
     "enabled",
+    "enroll_before",
     "status",
     "last_handshake",
     "report_section",
     "reported_revision",
     "apply_success",
     "reported_at",
-    "reported_digest"
+    "reported_digest",
+    "agent_outdated"
   ],
   "fields": [
     {
@@ -31,16 +33,15 @@
       "label": "Host User",
       "fieldtype": "Link",
       "options": "User",
-      "reqd": 1,
       "set_only_once": 1,
-      "description": "A dedicated user with the VPN Host role. Its API key authenticates the host agent."
+      "description": "Created for you when empty: a dedicated user with only the VPN Host role. Its API key authenticates the host agent."
     },
     {
       "fieldname": "public_key",
       "label": "WireGuard Public Key",
       "fieldtype": "Data",
-      "reqd": 1,
-      "unique": 1
+      "unique": 1,
+      "description": "Filled in when the server enrolls. Paste the key by hand only for the hub."
     },
     {
       "fieldname": "address",
@@ -56,6 +57,13 @@
       "fieldtype": "Check",
       "default": "1",
       "in_list_view": 1
+    },
+    {
+      "fieldname": "enroll_before",
+      "label": "Enroll Before",
+      "fieldtype": "Datetime",
+      "read_only": 1,
+      "description": "The enrollment command works until then. New Enrollment opens a new window."
     },
     {
       "fieldname": "status",
@@ -103,6 +111,15 @@
       "label": "Reported Digest",
       "fieldtype": "Data",
       "read_only": 1
+    },
+    {
+      "fieldname": "agent_outdated",
+      "label": "Outdated Agent",
+      "fieldtype": "Check",
+      "read_only": 1,
+      "in_list_view": 1,
+      "in_standard_filter": 1,
+      "description": "The host runs a different host.py than this app. Upgrade it as the host guide describes."
     }
   ],
   "permissions": [
