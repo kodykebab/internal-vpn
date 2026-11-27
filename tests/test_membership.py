@@ -476,6 +476,23 @@ class MembershipTests(unittest.TestCase):
         self.assertEqual(self.revision(), revision)
         self.assertEqual(self.hub_status(), "Current")
 
+    def test_member_changes_leave_the_network_unedited(self):
+        frappe.db.rollback()
+        modified = frappe.db.get_single_value("VPN Network", "modified")
+        open_form = frappe.get_doc("VPN Network")
+        revision = self.revision()
+        self.device()
+        self.assertEqual(self.revision(), revision + 1)
+        self.assertEqual(frappe.db.get_single_value("VPN Network", "modified"), modified)
+
+        def save_open_form():
+            open_form.stale_minutes = 7
+            open_form.save()
+
+        self.act(MANAGER, save_open_form)
+        self.assertEqual(self.revision(), revision + 1)
+        self.assertEqual(frappe.db.get_single_value("VPN Network", "stale_minutes"), 7)
+
     def test_membership_edits_use_native_versions_but_reports_do_not(self):
         device = self.device()
         self.update("VPN Device", device.name, actor=ENGINEER, public_key=key(4))
@@ -708,12 +725,13 @@ class MembershipTests(unittest.TestCase):
             alerts.reset_mock()
 
             refresh(minutes=10)
-            self.assertEqual(statuses(), {self.hub.name: "Stale", service.name: "Stale"})
-            subjects = sorted(call.args[1]["subject"] for call in alerts.call_args_list)
-            self.assertEqual(subjects, ["VPN server service is Stale", "VPN server service is Stale"])
-            self.assertTrue(all(MANAGER in call.args[0] for call in alerts.call_args_list))
+            # The hub stopped reporting; the other server was never set up, which is not an outage.
+            self.assertEqual(statuses(), {self.hub.name: "Stale", service.name: "Never Reported"})
+            subjects = [call.args[1]["subject"] for call in alerts.call_args_list]
+            self.assertEqual(subjects, ["VPN server service is Stale"])
+            self.assertIn(MANAGER, alerts.call_args.args[0])
             refresh(minutes=10)
-            self.assertEqual(alerts.call_count, 2)
+            self.assertEqual(alerts.call_count, 1)
 
             alerts.reset_mock()
             self.report_hub()

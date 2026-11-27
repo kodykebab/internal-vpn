@@ -43,10 +43,11 @@ class VPNNetwork(Document):
         return frappe.get_doc("VPN Network", "VPN Network", for_update=True)
 
     def validate(self):
-        frappe.db.get_singles_dict(self.doctype, for_update=True)
+        # System fields come from the locked row: members bump the revision without touching `modified`.
+        locked = frappe.db.get_singles_dict(self.doctype, for_update=True, cast=True)
         before = self.get_doc_before_save() or frappe._dict()
         for field in SYSTEM_FIELDS:
-            self.set(field, before.get(field))
+            self.set(field, locked.get(field))
         if self.subnet:
             self.subnet = str(parse(WireGuard.parse_subnet, self.subnet))
         if before.subnet and self.subnet != before.subnet:
@@ -78,7 +79,7 @@ class VPNNetwork(Document):
             frappe.throw(_("The hub must be an enabled server whose user has the VPN Host role"))
 
     def advance_revision(self) -> int:
-        self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None})
+        self.db_set({"revision": cint(self.revision) + 1, "hub_digest": None}, update_modified=False)
         if self.hub:
             self.enqueue_hub_apply()
         self.refresh_statuses()
@@ -112,7 +113,9 @@ class VPNNetwork(Document):
 
     def server_status(self, server, hub, members, deadline) -> str:
         """A missing report outranks the applied state: the host may have stopped running."""
-        if get_datetime(server.reported_at or server.creation) < deadline:
+        if not server.reported_at:
+            return "Never Reported" if get_datetime(server.creation) < deadline else "Pending"
+        if get_datetime(server.reported_at) < deadline:
             return "Stale"
         if self.is_current(server, hub, members):
             return "Current"

@@ -61,11 +61,11 @@
       "fieldname": "status",
       "label": "Status",
       "fieldtype": "Select",
-      "options": "Pending\nCurrent\nFailed\nStale",
+      "options": "Pending\nCurrent\nFailed\nStale\nNever Reported",
       "default": "Pending",
       "read_only": 1,
       "in_standard_filter": 1,
-      "description": "Current: the host applied the latest membership. Stale: no report within the network's limit."
+      "description": "Current: the host applied the latest membership. Stale: its reports stopped. Never Reported: its host is not set up yet."
     },
     {
       "fieldname": "last_handshake",

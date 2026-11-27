@@ -27,7 +27,7 @@ class VPNServer(VPNMember):
         reported_at: DF.Datetime | None
         reported_digest: DF.Data | None
         reported_revision: DF.Int
-        status: DF.Literal["Pending", "Current", "Failed", "Stale"]
+        status: DF.Literal["Pending", "Current", "Failed", "Stale", "Never Reported"]
         user: DF.Link
     # end: auto-generated types
 
