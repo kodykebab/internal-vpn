@@ -4,56 +4,72 @@ frappe.ui.form.on("VPN Device", {
 			frm.doc.enabled || frm.is_new() ? "" : __("Disabled. Delete it after the hub applies the change."),
 			"orange"
 		);
-		if (!frm.is_new()) frm.add_custom_button(__("Configuration"), () => show_configuration(frm));
+		if (!frm.is_new()) frm.add_custom_button(__("New Configuration"), () => new_configuration(frm));
 	},
-	before_save(frm) {
-		frm.vpn_was_new = frm.is_new();
+	async before_save(frm) {
+		if (!frm.doc.public_key) {
+			const keys = await generate_keys();
+			frm.vpn_private_key = keys.private_key;
+			frm.doc.public_key = keys.public_key;
+		}
+		frm.vpn_download = frm.is_new() || Boolean(frm.vpn_private_key);
 	},
 	after_save(frm) {
-		if (frm.vpn_was_new) show_configuration(frm);
+		if (frm.vpn_download) download_configuration(frm, frm.vpn_private_key);
+		frm.vpn_private_key = null;
+		frm.vpn_download = false;
 	},
 });
 
-function show_configuration(frm) {
+// The private key exists only in this page until the file is downloaded; the app never sees it.
+async function generate_keys() {
+	await frappe.require("/assets/internal_vpn/js/tweetnacl-1.0.3/nacl.min.js");
+	const secret = nacl.randomBytes(32);
+	secret[0] &= 248;
+	secret[31] = (secret[31] & 127) | 64;
+	const base64 = (bytes) => btoa(String.fromCharCode(...bytes));
+	return { private_key: base64(secret), public_key: base64(nacl.scalarMult.base(secret)) };
+}
+
+function new_configuration(frm) {
+	frappe.confirm(
+		__("Make new keys for {0}? Its current configuration stops working once the hub applies the change.", [
+			frm.doc.label,
+		]),
+		async () => {
+			const keys = await generate_keys();
+			frm.vpn_private_key = keys.private_key;
+			await frm.set_value("public_key", keys.public_key);
+			frm.save();
+		}
+	);
+}
+
+function download_configuration(frm, private_key) {
 	const snapshot = frm.doc.__onload?.configuration;
-	if (!snapshot) {
-		frappe.msgprint(__("The network has no hub yet."));
+	if (!snapshot?.peers.length) {
+		frappe.msgprint(__("This device is not active on the network yet, so there is no configuration to download."));
 		return;
 	}
-	const lines = [
+	const [hub] = snapshot.peers;
+	const text = [
 		"[Interface]",
-		"PrivateKey = <contents of vpn.key>",
+		`PrivateKey = ${private_key || "<private key of this device>"}`,
 		`Address = ${snapshot.address}/${snapshot.subnet.split("/")[1]}`,
-	];
-	for (const peer of snapshot.peers) {
-		lines.push(
-			"",
-			"[Peer]",
-			`PublicKey = ${peer.public_key}`,
-			`AllowedIPs = ${peer.allowed_ips}`,
-			`Endpoint = ${peer.endpoint}`,
-			"PersistentKeepalive = 25"
-		);
-	}
-	const configuration = lines.join("\n");
-	const dialog = new frappe.ui.Dialog({
-		title: __("WireGuard Configuration"),
-		fields: [
-			{ fieldname: "configuration", fieldtype: "Code", read_only: 1, default: configuration },
-			{
-				fieldtype: "HTML",
-				options: `<p class="text-muted small">${
-					snapshot.peers.length
-						? __("Replace the placeholder with the contents of vpn.key, then import this into the WireGuard app.")
-						: __("This device is disabled.")
-				}</p>`,
-			},
-		],
-		primary_action_label: __("Copy"),
-		primary_action() {
-			frappe.utils.copy_to_clipboard(configuration);
-			dialog.hide();
-		},
-	});
-	dialog.show();
+		"",
+		"[Peer]",
+		`PublicKey = ${hub.public_key}`,
+		`AllowedIPs = ${hub.allowed_ips}`,
+		`Endpoint = ${hub.endpoint}`,
+		"PersistentKeepalive = 25",
+		"",
+	].join("\n");
+	// WireGuard names a tunnel after its file: at most 15 of [A-Za-z0-9_=+.-].
+	const name = `ivpn-${frm.doc.label.toLowerCase().replace(/[^a-z0-9_=+.-]+/g, "-")}`.slice(0, 15).replace(/-+$/, "");
+	const link = document.createElement("a");
+	link.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+	link.download = `${name}.conf`;
+	link.click();
+	setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+	frappe.show_alert({ message: __("Import {0} into the WireGuard app.", [link.download]), indicator: "green" });
 }

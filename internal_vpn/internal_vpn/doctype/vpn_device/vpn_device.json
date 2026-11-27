@@ -26,7 +26,7 @@
       "fieldtype": "Data",
       "reqd": 1,
       "unique": 1,
-      "description": "On the device, run: wg genkey | tee vpn.key | wg pubkey"
+      "description": "Leave empty: keys are made in your browser when you save, and the configuration file downloads. The private key never leaves your browser. To use a key of your own, paste its public key."
     },
     {
       "fieldname": "address",
