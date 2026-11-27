@@ -48,6 +48,8 @@ jobs:
     timeout-minutes: 45
     env:
       SITE: ci.localhost
+      # uv would otherwise pick the newest Python, which some of Pilot's wheels do not support yet.
+      UV_PYTHON: "3.14"
       # Pull requests run on a merge commit that a clone cannot fetch, so test the head instead.
       APP_REPO: https://github.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}
       APP_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
