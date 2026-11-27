@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, scan and host agent
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        # 3.10 is the oldest Python the host guide allows on spokes.
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Ruff
+        if: matrix.python == '3.14'
+        run: |
+          uvx ruff format --check .
+          uvx ruff check .
+      - name: Frappe semgrep rules
+        if: matrix.python == '3.14'
+        run: |
+          git clone -q --depth 1 https://github.com/frappe/semgrep-rules.git /tmp/semgrep-rules
+          uvx semgrep scan --metrics=off --error --config /tmp/semgrep-rules/rules --exclude 'tweetnacl-*' internal_vpn
+      - name: Form scripts and JSON
+        if: matrix.python == '3.14'
+        run: |
+          find internal_vpn -name '*.js' -not -path '*/tweetnacl-*' -print0 | xargs -0 -n1 node --check
+          find internal_vpn -name '*.json' -print0 | xargs -0 -n1 python3 -m json.tool --no-ensure-ascii > /dev/null
+      - name: Host agent tests
+        working-directory: tests
+        run: PYTHONPATH=..:. uv run --no-project --python ${{ matrix.python }} python -m unittest test_host
+
+  bench:
+    name: Pilot bench and site tests
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SITE: ci.localhost
+      # Pull requests run on a merge commit that a clone cannot fetch, so test the head instead.
+      APP_REPO: https://github.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}
+      APP_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pilot
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/frappe/pilot/develop/install.sh | bash
+          echo "$HOME/pilot/bin" >> "$GITHUB_PATH"
+      - name: Bench with this commit
+        # get-app runs Pilot's app validator: repo structure, pyproject, dependencies, hooks, fixtures.
+        run: |
+          pilot new ci --frappe-branch version-16
+          pilot -b ci init
+          pilot -b ci get-app "$APP_REPO" --commit "$APP_COMMIT" --skip-assets
+          pilot -b ci new-site "$SITE" --apps internal_vpn --admin-password admin --skip-assets
+          pilot -b ci frappe --site "$SITE" set-config allow_tests true
+          pilot -b ci frappe --site "$SITE" set-config internal_vpn_test_site 1
+      - name: Start the bench
+        run: |
+          nohup pilot -b ci start > "$RUNNER_TEMP/bench.log" 2>&1 &
+          for _ in $(seq 60); do pilot -b ci frappe --site "$SITE" execute frappe.ping && break; sleep 2; done
+      - name: DocType tests
+        run: pilot -b ci frappe --site "$SITE" run-tests --app internal_vpn
+      - name: Request, topology and host tests
+        run: |
+          cd "$HOME/pilot/benches/ci/sites"
+          VPN_TEST_SITES_PATH="$PWD" VPN_TEST_SITE="$SITE" PYTHONPATH=../apps/internal_vpn/tests \
+            ../env/bin/python -m unittest test_host test_network test_requests
+      - name: Bench log
+        if: failure()
+        run: tail -100 "$RUNNER_TEMP/bench.log"

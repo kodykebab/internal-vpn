@@ -57,7 +57,7 @@ class VPNTestCase(IntegrationTestCase):
                         "roles": [{"role": role}],
                     }
                 ).insert()
-        frappe.db.commit()
+        frappe.db.commit()  # keep shared users past per-test rollback  # nosemgrep
 
     def setUp(self):
         super().setUp()

@@ -16,6 +16,18 @@ def key(byte):
     return base64.b64encode(bytes([byte]) * 32).decode()
 
 
+def root_owned(config):
+    """Make only `config` look root-owned; other paths keep their real metadata."""
+    real = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == config:
+            return SimpleNamespace(st_uid=0, st_mode=0o100600)
+        return real(path, *args, **kwargs)
+
+    return stat
+
+
 CONFIG = {
     "name": "service-1",
     "subnet": "100.100.64.0/24",
@@ -291,7 +303,7 @@ class UpdateTests(unittest.TestCase):
                 self.subTest(stage=stage),
                 patch("sys.argv", ["host.py", "update", "--config", str(config), "--state", str(self.state)]),
                 patch("os.geteuid", return_value=0),
-                patch("pathlib.Path.stat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100600)),
+                patch.object(Path, "stat", root_owned(config)),
                 patch.object(ControlPlane, "get_configuration", return_value=SNAPSHOT),
                 patch.object(ControlPlane, "report"),
                 patch.object(Host, "apply"),
