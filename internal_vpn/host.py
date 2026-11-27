@@ -76,6 +76,13 @@ class WireGuard:
             for key, allowed in fields[0].items()
         }
 
+    def handshakes(self) -> dict[str, int]:
+        """Unix time of each peer's latest handshake; 0 when there has been none."""
+        return {
+            key: int(seconds)
+            for key, seconds in (line.split("\t", 1) for line in self.show("latest-handshakes").splitlines())
+        }
+
     def set_peer(self, public_key: str, *arguments: str):
         self.execute(WG, "set", self.interface, "peer", public_key, *arguments)
 

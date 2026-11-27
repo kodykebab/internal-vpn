@@ -17,6 +17,7 @@ class VPNDevice(VPNMember):
         address: DF.Data | None
         enabled: DF.Check
         label: DF.Data
+        last_handshake: DF.Datetime | None
         public_key: DF.Data
     # end: auto-generated types
 

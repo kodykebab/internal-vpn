@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -375,7 +376,11 @@ class MembershipTests(unittest.TestCase):
     def test_hub_job_applies_and_records_reports(self):
         self.device()
         self.assertEqual(self.wakeup.call_count, 1)
-        with tempfile.TemporaryDirectory() as state, patch.object(Host, "apply") as apply:
+        with (
+            tempfile.TemporaryDirectory() as state,
+            patch.object(Host, "apply") as apply,
+            patch.object(WireGuard, "handshakes", return_value={}),
+        ):
             self.act("Administrator", apply_hub)
             apply.assert_not_called()
             with patch.dict(
@@ -392,6 +397,28 @@ class MembershipTests(unittest.TestCase):
                 self.assertEqual(self.hub_status(), "Failed")
                 failures = frappe.get_all("Error Log", {"method": "Internal VPN hub apply failed at apply"})
                 self.assertTrue(failures)
+
+    def test_hub_job_records_handshakes(self):
+        device = self.device()
+        atlas = self.server(SPOKE, key(2), label="atlas")
+        now = int(time.time())
+
+        def run(seconds):
+            with (
+                tempfile.TemporaryDirectory() as state,
+                patch.dict(frappe.conf, {"internal_vpn_interface": "ivpn0", "internal_vpn_state_dir": state}),
+                patch.object(Host, "apply"),
+                patch.object(WireGuard, "handshakes", return_value={key(3): seconds, key(2): 0}),
+            ):
+                self.act("Administrator", apply_hub)
+            frappe.db.rollback()
+            return frappe.db.get_value("VPN Device", device.name, "last_handshake")
+
+        first = run(now)
+        self.assertLess(abs((first - now_datetime()).total_seconds()), 5)
+        self.assertIsNone(frappe.db.get_value("VPN Server", atlas.name, "last_handshake"))
+        self.assertEqual(run(now + 30), first)
+        self.assertGreater(run(now + 120), first)
 
     def test_capacity_reserves_disabled_members_and_delete_frees_it(self):
         with patch(f"{MODULE}.MAX_PEERS", 1):

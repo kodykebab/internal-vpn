@@ -100,6 +100,7 @@ The firewall loads before `ivpn0`. It blocks hub services from members and start
 | --- | --- |
 | Add an engineer | Manager: **Invite Engineer** on VPN Network. Engineer: accept the email, create a VPN Device, import the configuration it shows. Later sign-ins use the email link on the login page. |
 | Disable a member | Clear **Enabled**. The hub's status in the VPN Server list turns Current once applied. |
+| Watch connections | The VPN Device list shows each device Connected, Seen some time ago, or Never connected, from the hub's latest WireGuard handshake. Servers show **Last Handshake** too. Never connected while the hub is Current points at the device's network. |
 | Watch servers | The VPN Server list shows each server Current, Pending, Failed or Stale. **VPN Server Health** notifies managers when one turns Failed or Stale, and when it recovers. Set **Stale After (Minutes)** on VPN Network. Status needs the scheduler. To stop alerts, disable the notification. |
 | Limit access | Create a VPN Access record per engineer and server, with ports if needed. Then turn on **Access Control** on VPN Network. Until then, every device reaches every server. |
 | Revoke a user | Disable the user or remove their VPN role. |

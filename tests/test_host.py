@@ -175,6 +175,11 @@ class UpdateTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args_list[1].args[0], ["/usr/bin/wg", "show", "ivpn0", "public-key"])
 
+    def test_handshakes_are_read_per_peer(self):
+        with patch.object(WireGuard, "show", return_value=f"{key(2)}\t1700000000\n{key(3)}\t0") as show:
+            self.assertEqual(self.host.wireguard.handshakes(), {key(2): 1700000000, key(3): 0})
+        show.assert_called_once_with("latest-handshakes")
+
     def test_removal_precedes_updates_and_private_key_is_untouched(self):
         calls = self.apply((key(3), "100.100.64.3/32", "(none)", "off"))
         self.assertEqual(calls[0], (key(3), "remove"))

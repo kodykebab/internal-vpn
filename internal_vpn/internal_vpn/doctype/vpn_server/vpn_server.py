@@ -22,6 +22,7 @@ class VPNServer(VPNMember):
         apply_success: DF.Check
         enabled: DF.Check
         label: DF.Data
+        last_handshake: DF.Datetime | None
         public_key: DF.Data
         reported_at: DF.Datetime | None
         reported_digest: DF.Data | None
@@ -32,6 +33,7 @@ class VPNServer(VPNMember):
 
     system_fields = (
         "address",
+        "last_handshake",
         "status",
         "reported_revision",
         "apply_success",

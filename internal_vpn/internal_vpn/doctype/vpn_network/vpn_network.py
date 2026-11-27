@@ -1,4 +1,5 @@
 import ipaddress
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -6,7 +7,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.query_builder import DocType
-from frappe.utils import add_to_date, cint, get_datetime, now_datetime
+from frappe.utils import add_to_date, cint, convert_utc_to_system_timezone, get_datetime, now_datetime
 
 from internal_vpn.host import MAX_PEERS, Host, WireGuard
 
@@ -93,6 +94,21 @@ class VPNNetwork(Document):
             status = self.server_status(server, hub, members, deadline)
             if status != server.status:
                 frappe.get_doc("VPN Server", server.name).db_set("status", status, update_modified=False)
+
+    @staticmethod
+    def record_handshakes(handshakes: dict[str, int]):
+        """Store each member's latest handshake from the hub. Moves under a minute are not written,
+        so an active peer costs about one write per WireGuard rekey."""
+        for doctype in MEMBER_ROLES:
+            for member in frappe.get_all(doctype, fields=["name", "public_key", "last_handshake"], limit=0):
+                seconds = handshakes.get(member.public_key)
+                if not seconds:
+                    continue
+                seen = convert_utc_to_system_timezone(datetime.fromtimestamp(seconds, UTC)).replace(
+                    tzinfo=None
+                )
+                if not member.last_handshake or abs((seen - member.last_handshake).total_seconds()) >= 60:
+                    frappe.db.set_value(doctype, member.name, "last_handshake", seen, update_modified=False)
 
     def server_status(self, server, hub, members, deadline) -> str:
         """A missing report outranks the applied state: the host may have stopped running."""
@@ -303,7 +319,7 @@ class VPNMember(Document):
     """A VPN Server or VPN Device. It holds one address until deleted; membership changes advance
     the network revision."""
 
-    system_fields = ("address",)
+    system_fields = ("address", "last_handshake")
 
     def before_insert(self):
         for field in self.system_fields:
@@ -375,6 +391,8 @@ def apply_hub():
             lambda: network.get_configuration(hub),
             lambda revision, digest: hub.record_report(network, revision, digest),
         )
+        host.stage = "handshakes"
+        network.record_handshakes(host.wireguard.handshakes())
     except Exception:  # noqa: BLE001 - keep the recorded failure report instead of rolling it back
         frappe.log_error(title=f"Internal VPN hub apply failed at {host.stage}")
 
