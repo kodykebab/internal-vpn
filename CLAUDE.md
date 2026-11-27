@@ -11,6 +11,7 @@ Read [README.md](README.md) first. Adapted from the Pilot and Atlas guides.
 - Reuse existing patterns and keep one owner for mutable state. Delete before adding.
 - Keep permissions, validation, synchronization and cleanup when simplifying. Fail near the cause; retry only safe operations.
 - Lock the network before reading or changing membership: `VPNNetwork.load_locked()`, then the member. Do not commit by hand; a conflicting change fails with `QueryDeadlockError` and can be retried.
+- After the lock, read with `for_update`. Pilot turns MariaDB snapshot isolation off, so a plain read can return data from before the lock.
 - Use Frappe APIs and hooks over our own mechanisms, and the query builder instead of raw SQL.
 - Keep comments and docstrings short. Do not put comments or docstrings at the top of a file.
 - Run `uvx ruff format` and `uvx ruff check`, the DocType tests with `bench run-tests --app internal_vpn`, and the tests in `tests/`. Put a new test in a DocType's `IntegrationTestCase` unless it needs real HTTP or several connections.

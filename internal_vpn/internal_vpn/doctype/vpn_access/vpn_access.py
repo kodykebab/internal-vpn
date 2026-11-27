@@ -27,8 +27,10 @@ class VPNAccess(Document):
         self.ports = parse(WireGuard.parse_ports, self.ports or "")
         if self.server == network.hub:
             frappe.throw(_("The hub is not a service; grant access to a spoke"))
-        if frappe.db.exists(
-            self.doctype, {"server": self.server, "user": self.user, "name": ("!=", self.name)}
+        if frappe.db.get_value(
+            self.doctype,
+            {"server": self.server, "user": self.user, "name": ("!=", self.name)},
+            for_update=True,
         ):
             frappe.throw(_("This engineer already has access to this server"), frappe.UniqueValidationError)
 

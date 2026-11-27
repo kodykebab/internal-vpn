@@ -130,7 +130,7 @@ class VPNServer(VPNMember):
         return {
             "subnet": network.subnet,
             "address": self.address,
-            "hub_public_key": frappe.db.get_value("VPN Server", network.hub, "public_key"),
+            "hub_public_key": frappe.db.get_value("VPN Server", network.hub, "public_key", for_update=True),
             "token": self.issue_token(),
         }
 

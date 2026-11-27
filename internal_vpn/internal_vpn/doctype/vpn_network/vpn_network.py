@@ -17,7 +17,8 @@ SYSTEM_FIELDS = ("revision", "hub_digest")
 
 
 class VPNNetwork(Document):
-    """Network settings. The row lock serializes allocation and revisions."""
+    """Network settings. The row lock serializes allocation and revisions. Reads after it lock their
+    rows too: Pilot turns MariaDB snapshot isolation off, so plain reads could return an older snapshot."""
 
     # begin: auto-generated types
     # This code is auto-generated. Do not modify anything in this block.
@@ -74,7 +75,9 @@ class VPNNetwork(Document):
             return
         if not self.subnet or not self.hub_endpoint:
             frappe.throw(_("The hub requires a subnet and a UDP endpoint"))
-        hub = frappe.db.get_value("VPN Server", self.hub, ["user", "enabled", "public_key"], as_dict=True)
+        hub = frappe.db.get_value(
+            "VPN Server", self.hub, ["user", "enabled", "public_key"], as_dict=True, for_update=True
+        )
         if not hub or not hub.enabled or not hub.public_key or not self.is_eligible(hub.user, "VPN Server"):
             frappe.throw(_("The hub must be an enabled server with a key, whose user has the VPN Host role"))
 
@@ -91,7 +94,8 @@ class VPNNetwork(Document):
             return
         hub, members = self.get_membership()
         deadline = add_to_date(now_datetime(), minutes=-(cint(self.stale_minutes) or 5))
-        for server in frappe.get_all("VPN Server", fields=["*"], order_by="name asc", limit=0):
+        servers = frappe.qb.get_query("VPN Server", fields=["*"], order_by="name asc", for_update=True)
+        for server in servers.run(as_dict=True):
             status = self.server_status(server, hub, members, deadline)
             if status != server.status:
                 frappe.get_doc("VPN Server", server.name).db_set("status", status, update_modified=False)
@@ -169,7 +173,7 @@ class VPNNetwork(Document):
         used = {
             address
             for doctype in MEMBER_ROLES
-            for address in frappe.get_all(doctype, pluck="address", limit=0)
+            for address in frappe.qb.get_query(doctype, fields=["address"], for_update=True).run(pluck=True)
         }
         if len(used) >= MAX_PEERS + 1:
             frappe.throw(_("Network member limit reached; delete unused members first"))
@@ -208,6 +212,7 @@ class VPNNetwork(Document):
             .select(member.star)
             .where((member.enabled == 1) & (user.enabled == 1) & owner.isin(owners_with_role))
             .where(member.public_key.isnotnull())
+            .for_update()
         )
         if names:
             query = query.where(member.name.isin(names))
@@ -285,7 +290,9 @@ class VPNNetwork(Document):
             return access
         grants = {
             (grant.server, grant.user): grant.ports or ""
-            for grant in frappe.get_all("VPN Access", fields=["server", "user", "ports"], limit=0)
+            for grant in frappe.qb.get_query(
+                "VPN Access", fields=["server", "user", "ports"], for_update=True
+            ).run(as_dict=True)
         }
         for device in (peer for peer in members.values() if peer.doctype == "VPN Device"):
             for service in services:
@@ -309,11 +316,11 @@ class VPNNetwork(Document):
         if method != "on_trash" and unchanged:
             return
 
-        hub_user = frappe.db.get_value("VPN Server", self.hub, "user") if self.hub else None
+        hub_user = frappe.db.get_value("VPN Server", self.hub, "user", for_update=True) if self.hub else None
         if hub_user == user.name and (method == "on_trash" or not user.enabled or "VPN Host" not in roles):
             frappe.throw(_("The hub account must stay enabled with the VPN Host role"))
         if any(
-            frappe.db.exists(doctype, {owner: user.name, "enabled": 1})
+            frappe.db.get_value(doctype, {owner: user.name, "enabled": 1}, for_update=True)
             for doctype, owner in MEMBER_OWNERS.items()
         ):
             self.advance_revision()
@@ -339,7 +346,9 @@ class VPNMember(Document):
         # A server has no key until it enrolls; devices require one in their DocType.
         self.public_key = parse(WireGuard.validate_public_key, self.public_key) if self.public_key else None
         if self.public_key and any(
-            frappe.db.exists(doctype, {"public_key": self.public_key, "name": ("!=", self.name)})
+            frappe.db.get_value(
+                doctype, {"public_key": self.public_key, "name": ("!=", self.name)}, for_update=True
+            )
             for doctype in MEMBER_ROLES
         ):
             frappe.throw(_("This WireGuard key is already in use"), frappe.UniqueValidationError)
@@ -431,7 +440,7 @@ def login_via_key(key: str):
 
 def refresh_statuses():
     """Scheduled, so servers that stop reporting turn Stale."""
-    frappe.get_doc("VPN Network").refresh_statuses()
+    VPNNetwork.load_locked().refresh_statuses()
 
 
 def on_user_change(user, method=None):
