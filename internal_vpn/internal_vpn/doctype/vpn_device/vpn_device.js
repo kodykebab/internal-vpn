@@ -22,7 +22,19 @@ frappe.ui.form.on("VPN Device", {
 });
 
 // The private key exists only in this page until the file is downloaded; the app never sees it.
+// WebCrypto needs HTTPS and a current browser; the VPN entrance is plain HTTP, so it uses tweetnacl.
 async function generate_keys() {
+	try {
+		const pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+		const { d, x } = await crypto.subtle.exportKey("jwk", pair.privateKey);
+		const base64 = (url) => url.replaceAll("-", "+").replaceAll("_", "/") + "=";
+		return { private_key: base64(d), public_key: base64(x) };
+	} catch {
+		return generate_nacl_keys();
+	}
+}
+
+async function generate_nacl_keys() {
 	await frappe.require("/assets/internal_vpn/js/tweetnacl-1.0.3/nacl.min.js");
 	const secret = nacl.randomBytes(32);
 	secret[0] &= 248;
