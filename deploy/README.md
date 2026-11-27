@@ -121,6 +121,7 @@ All are off by default.
 | --- | --- |
 | Two-factor login | System Settings > Enable Two Factor Auth |
 | Backups | Schedule site backups. Keep each host's `/var/lib/internal-vpn` |
+| Datum telemetry | VPN Network > **Datum Telemetry**. **Pilot** uses this server's Pilot credential and honors its `[telemetry] enabled`. **Site Config** uses `internal_vpn_datum_endpoint` and `internal_vpn_datum_token`; renew the token before it expires. The hub sends `internal_vpn_*` every 5 minutes: peers and connected peers by kind, servers by status, hub revision lag and apply result, and per server its handshake age and bytes. Needs the `transfer` line of the sudoers rule |
 
 ## Database recovery
 

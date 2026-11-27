@@ -13,6 +13,7 @@ from werkzeug.wrappers import Request
 
 from internal_vpn.host import Host, WireGuard
 from internal_vpn.internal_vpn.doctype.vpn_network.vpn_network import VPNNetwork, apply_hub
+from internal_vpn.internal_vpn.telemetry import Telemetry, send_telemetry
 
 IGNORE_TEST_RECORD_DEPENDENCIES = ["User", "VPN Server"]
 MODULE = "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network"
@@ -282,6 +283,76 @@ class TestVPNNetwork(VPNTestCase):
         self.assertIsNone(frappe.db.get_value("VPN Server", atlas.name, "last_handshake"))
         self.assertEqual(run(now + 30), first)
         self.assertGreater(run(now + 120), first)
+
+    def test_telemetry_needs_a_credential_from_its_source(self):
+        datum = {
+            "internal_vpn_datum_endpoint": "https://datum.example.test/",
+            "internal_vpn_datum_token": "t",
+        }
+        with self.assertRaises(frappe.ValidationError):
+            self.save_network(telemetry="Site Config")
+        with patch.dict(frappe.conf, datum):
+            self.save_network(telemetry="Site Config")
+        with tempfile.TemporaryDirectory() as benches:
+            config = Path(benches) / "common_config.toml"
+            network = frappe.get_doc("VPN Network")
+            network.telemetry = "Pilot"
+            with patch("internal_vpn.internal_vpn.telemetry.get_bench_path", return_value=f"{benches}/hub"):
+                for text in ("", '[telemetry]\nendpoint = "https://d.test"\ntoken = "p"\nenabled = false\n'):
+                    config.write_text(text)
+                    with self.subTest(text=text), self.assertRaises(frappe.ValidationError):
+                        Telemetry(network).credential()
+                config.write_text('[telemetry]\nendpoint = "https://d.test"\ntoken = "p"\n')
+                self.assertEqual(Telemetry(network).credential(), ("https://d.test", "p"))
+
+    def test_telemetry_reports_the_hub_interface_and_statuses(self):
+        self.device()
+        atlas = self.server(SPOKE, key(2), label="atlas")
+        now = int(time.time())
+        datum = {
+            "internal_vpn_datum_endpoint": "https://datum.example.test",
+            "internal_vpn_datum_token": "t",
+            "internal_vpn_interface": "ivpn0",
+        }
+
+        def send():
+            with (
+                patch.dict(frappe.conf, datum),
+                patch.object(
+                    WireGuard, "handshakes", return_value={key(3): now - 10, key(2): now - 600, key(9): now}
+                ),
+                patch.object(WireGuard, "show", return_value=f"{key(2)}\t100\t200"),
+                patch("internal_vpn.internal_vpn.telemetry.make_post_request") as post,
+            ):
+                self.act("Administrator", send_telemetry)
+            return post
+
+        self.assertFalse(send().called)
+        with patch.dict(frappe.conf, datum):
+            self.save_network(telemetry="Site Config")
+        post = send()
+        self.assertEqual(post.call_args.args, ("https://datum.example.test/v1/ingest",))
+        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": "Bearer t"})
+        values = {
+            (row["metric"], tuple(sorted(row["labels"].items()))): row["value"]
+            for row in post.call_args.kwargs["json"]["samples"]
+        }
+        server = (("label", "atlas"), ("server", atlas.name))
+        for kind, peers, connected in (("server", 1, 0), ("device", 1, 1)):
+            self.assertEqual(values[("internal_vpn_peers", (("kind", kind),))], peers)
+            self.assertEqual(values[("internal_vpn_peers_connected", (("kind", kind),))], connected)
+        self.assertAlmostEqual(values[("internal_vpn_server_handshake_age_seconds", server)], 600, delta=5)
+        self.assertEqual(values[("internal_vpn_server_received_bytes_total", server)], 100)
+        self.assertEqual(values[("internal_vpn_server_sent_bytes_total", server)], 200)
+        statuses = {
+            labels[0][1]: value
+            for (metric, labels), value in values.items()
+            if metric == "internal_vpn_servers"
+        }
+        self.assertEqual(set(statuses), {"pending", "current", "failed", "stale", "never_reported"})
+        self.assertEqual(sum(statuses.values()), 2)
+        self.assertEqual(values[("internal_vpn_hub_revision_lag", ())], self.revision())
+        self.assertEqual(values[("internal_vpn_hub_apply_success", ())], 0)
 
     def test_system_fields_keep_their_values(self):
         device = self.device()

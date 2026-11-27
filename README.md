@@ -23,6 +23,7 @@ Engineer devices --WireGuard--> Hub --WireGuard--> Servers (Central, Atlas, Carg
 | `internal_vpn/internal_vpn/notification` | **VPN Server Health** tells managers when a server turns Failed or Stale and when it recovers. **VPN Device Registered** tells them about every new device |
 | `internal_vpn/internal_vpn/doctype/vpn_device` | An engineer's device: key, enablement, configuration |
 | `internal_vpn/internal_vpn/doctype/vpn_access` | Grants one engineer's devices access to one server, optionally limited to ports |
+| `internal_vpn/internal_vpn/telemetry.py` | Optional: the hub sends VPN health to Datum every 5 minutes |
 | `internal_vpn/host.py` | Host agent: `enroll`, `update`, `upgrade`, `measure`. Standard library only. The hub job imports it |
 | `deploy/` | Hub firewall and its unit, sudoers rule, the VPN Desk entrance for nginx, and the [host guide](deploy/README.md) |
 

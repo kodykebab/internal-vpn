@@ -36,6 +36,7 @@ class VPNNetwork(Document):
         revision: DF.Int
         stale_minutes: DF.Int
         subnet: DF.Data | None
+        telemetry: DF.Literal["", "Pilot", "Site Config"]
         vpn_only_desk: DF.Check
     # end: auto-generated types
 
@@ -58,6 +59,10 @@ class VPNNetwork(Document):
         if self.hub_endpoint:
             self.hub_endpoint = parse(WireGuard.parse_endpoint, self.hub_endpoint)
         self.validate_hub(before.hub)
+        if self.telemetry and self.telemetry != before.telemetry:
+            from internal_vpn.internal_vpn.telemetry import Telemetry
+
+            Telemetry(self).credential()
         if any(
             self.get(field) != before.get(field)
             for field in ("subnet", "hub", "hub_endpoint", "access_control")

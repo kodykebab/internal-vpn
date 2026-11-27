@@ -12,6 +12,7 @@
     "access_control",
     "vpn_only_desk",
     "onboarding_minutes",
+    "telemetry",
     "revision",
     "hub_digest"
   ],
@@ -65,6 +66,13 @@
       "non_negative": 1,
       "depends_on": "vpn_only_desk",
       "description": "An engineer may use the site from outside the VPN until their first device is this old, to copy its configuration."
+    },
+    {
+      "fieldname": "telemetry",
+      "label": "Datum Telemetry",
+      "fieldtype": "Select",
+      "options": "\nPilot\nSite Config",
+      "description": "Off when empty. The hub sends VPN health to Datum every 5 minutes. Pilot: with this server's Pilot credential. Site Config: with internal_vpn_datum_endpoint and internal_vpn_datum_token."
     },
     {
       "fieldname": "revision",

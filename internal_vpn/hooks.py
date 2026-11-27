@@ -34,6 +34,7 @@ scheduler_events = {
         "* * * * *": [
             "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.apply_hub",
             "internal_vpn.internal_vpn.doctype.vpn_network.vpn_network.refresh_statuses",
-        ]
+        ],
+        "*/5 * * * *": ["internal_vpn.internal_vpn.telemetry.send_telemetry"],
     }
 }
